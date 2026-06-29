@@ -44,6 +44,16 @@
       "require": "./dist/testing/index.js",
       "default": "./dist/testing/index.js"
     },
+    "./sqlite": {
+      "types": "./dist/dialects/sqlite/index.d.ts",
+      "require": "./dist/dialects/sqlite/index.js",
+      "default": "./dist/dialects/sqlite/index.js"
+    },
+    "./postgres": {
+      "types": "./dist/dialects/postgres/index.d.ts",
+      "require": "./dist/dialects/postgres/index.js",
+      "default": "./dist/dialects/postgres/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
