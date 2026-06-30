@@ -8,6 +8,16 @@ package release is useful for users.
 
 ## Unreleased
 
+### Changed
+
+- `MessagingModule.forRootAsync`'s `useTransport` factory is typed `(...args: any[])`
+  (matching Nest's own `FactoryProvider.useFactory`) so an idiomatic factory whose
+  parameters match `inject` is assignable under `strict` without casting.
+- `KafkaInboxConsumer`'s `sideEffect` now receives the derived dedup key as its
+  second argument (`(payload, dedupKey) => …`), so consumers can stamp it into
+  their own records.
+  (Both surfaced by dogfooding the reference-app onto the library before release.)
+
 ### Added
 
 - Initial extraction of the reliable-messaging pair (transactional outbox →

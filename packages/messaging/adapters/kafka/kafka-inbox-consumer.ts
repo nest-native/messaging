@@ -32,10 +32,12 @@ export interface ConsumeOptions<T> {
   /** Type guard; a payload that fails is a permanent error → dead-letter. */
   validate: (payload: unknown) => payload is T;
   /**
-   * The exactly-once side effect, run inside the dedup transaction. On a sqlite
-   * inbox store it MUST be synchronous + DB-only; on postgres it may be async.
+   * The exactly-once side effect, run inside the dedup transaction. Receives the
+   * validated payload and the derived dedup key (handy for stamping the key into
+   * the side effect's own record). On a sqlite inbox store it MUST be synchronous
+   * + DB-only; on postgres it may be async.
    */
-  sideEffect: (payload: T) => void | Promise<void>;
+  sideEffect: (payload: T, dedupKey: string) => void | Promise<void>;
   /** Topic poison messages are republished to before acking. */
   dlqTopic: string;
 }
@@ -70,7 +72,7 @@ export class KafkaInboxConsumer {
       if (!options.validate(payload)) {
         throw new PermanentError('payload failed validation');
       }
-      const sideEffect: InboxSideEffect = () => options.sideEffect(payload);
+      const sideEffect: InboxSideEffect = () => options.sideEffect(payload, dedupKey);
       const outcome = await this.inbox.runOnce(dedupKey, options.source, sideEffect);
       if (outcome === 'duplicate') {
         this.logger.debug(`duplicate skipped: ${dedupKey}`);

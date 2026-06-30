@@ -296,7 +296,9 @@ describe('MessagingModule.forRootAsync / no inbox', () => {
             outboxStore: new SqliteOutboxStore(),
             imports: [transportConfig],
             inject: [TRANSPORT_CONFIG],
-            useTransport: (t: unknown) => t as InMemoryOutboxTransport,
+            // Idiomatic typed factory — assignable now that useTransport mirrors
+            // Nest's `(...args: any[]) => T` (the dogfood-surfaced ergonomic fix).
+            useTransport: (t: InMemoryOutboxTransport) => t,
           }),
         ],
       },
