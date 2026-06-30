@@ -84,7 +84,7 @@ function writeConsumerPackage(tarballPath) {
   const dependencies = {
     '@nestjs/common': devDependencies['@nestjs/common'],
     '@nestjs/core': devDependencies['@nestjs/core'],
-    '@nestjs/testing': devDependencies['@nestjs/testing'],
+    '@nestjs-cls/transactional': devDependencies['@nestjs-cls/transactional'],
     'drizzle-orm': devDependencies['drizzle-orm'],
     '@nest-native/messaging': `file:${tarballPath}`,
     'reflect-metadata': devDependencies['reflect-metadata'],
@@ -123,66 +123,45 @@ function writeConsumerSmoke() {
 require('reflect-metadata');
 
 const assert = require('node:assert/strict');
-const { Injectable, Module } = require('@nestjs/common');
-const { Test } = require('@nestjs/testing');
-const {
-  DrizzleModule,
-  InjectDrizzle,
-  getDrizzleClientToken,
-} = require('@nest-native/messaging');
+const core = require('@nest-native/messaging');
+const sqlite = require('@nest-native/messaging/sqlite');
+const postgres = require('@nest-native/messaging/postgres');
+const testing = require('@nest-native/messaging/testing');
 const packageJson = require('@nest-native/messaging/package.json');
 
-const fakeClient = {
-  query: {
-    users: {
-      findMany: () => ['Ada', 'Grace'],
-    },
-  },
-};
-const schema = {
-  users: {
-    tableName: 'users',
-  },
-};
-
-class UsersService {
-  constructor(db) {
-    this.db = db;
-  }
-
-  findMany() {
-    return this.db.query.users.findMany();
-  }
+// Every public entry point resolves from the packed tarball and exports its
+// documented surface.
+for (const name of [
+  'MessagingModule', 'OutboxProducer', 'OutboxClaimer', 'InboxService',
+  'runWorkerLoop', 'RetryableError', 'PermanentError', 'OUTBOX_TRANSPORT',
+  'deriveDedupKey', 'encodeWireValue', 'decodeWireValue',
+]) {
+  assert.ok(name in core, 'missing core export: ' + name);
 }
-InjectDrizzle()(UsersService, undefined, 0);
-Injectable()(UsersService);
+for (const name of ['SqliteOutboxStore', 'SqliteInboxStore', 'outboxEvents', 'inboxEvents']) {
+  assert.ok(name in sqlite, 'missing sqlite export: ' + name);
+}
+for (const name of ['PostgresOutboxStore', 'PostgresInboxStore', 'outboxEvents', 'inboxEvents']) {
+  assert.ok(name in postgres, 'missing postgres export: ' + name);
+}
+assert.ok('InMemoryOutboxTransport' in testing, 'missing testing export');
+assert.ok(packageJson.exports['./kafka'], 'missing ./kafka subpath export');
 
-class AppModule {}
-Module({
-  imports: [
-    DrizzleModule.forRoot({
-      connection: fakeClient,
-      isGlobal: false,
-      schema,
-    }),
-  ],
-  providers: [UsersService],
-})(AppModule);
+// The published package declares zero runtime dependencies (consumers only pull
+// the peers they actually use).
+assert.equal(
+  Object.keys(packageJson.dependencies ?? {}).length,
+  0,
+  'The packed package must not declare runtime dependencies.',
+);
 
+// Functional smoke: the in-memory transport records a publish (no broker, no DB).
 (async () => {
-  const moduleRef = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
-
-  assert.equal(moduleRef.get(getDrizzleClientToken()), fakeClient);
-  assert.deepEqual(moduleRef.get(UsersService).findMany(), ['Ada', 'Grace']);
-  assert.equal(
-    Object.keys(packageJson.dependencies ?? {}).length,
-    0,
-    'The packed package must not declare runtime dependencies.',
-  );
-
-  await moduleRef.close();
+  const transport = new testing.InMemoryOutboxTransport();
+  await transport.publish({ id: 'e1', topic: 'demo', payload: { ok: true } });
+  assert.equal(transport.list().length, 1);
+  assert.equal(transport.list()[0].topic, 'demo');
+  assert.ok(new core.RetryableError('x', 100).delayMs === 100);
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
