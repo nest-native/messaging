@@ -38,7 +38,6 @@ export interface MessagingModuleAsyncOptions {
   // `any[]` (not `unknown[]`) mirrors Nest's own `FactoryProvider.useFactory`, so
   // an idiomatic factory whose params match `inject` (e.g. `(p: KafkaProducer) => …`)
   // is assignable under `strictFunctionTypes` without forcing the caller to cast.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   useTransport: (...args: any[]) => OutboxTransport | Promise<OutboxTransport>;
 }
 
