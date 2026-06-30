@@ -12,14 +12,20 @@ type Db = BetterSQLite3Database<Record<string, never>>;
 /**
  * better-sqlite3 surfaces a unique-constraint violation as a `SqliteError` with
  * `code === 'SQLITE_CONSTRAINT_UNIQUE'`. Match on the code (stable across driver
- * versions), not the message.
+ * versions), not the message. Drizzle may wrap driver errors in a
+ * `DrizzleQueryError`, so the code may instead sit on `error.cause` — check both.
  */
 export function isSqliteUniqueViolation(error: unknown): boolean {
+  const code = 'SQLITE_CONSTRAINT_UNIQUE';
+  return hasCode(error, code) || hasCode((error as { cause?: unknown })?.cause, code);
+}
+
+function hasCode(error: unknown, code: string): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
-    (error as { code?: unknown }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+    (error as { code?: unknown }).code === code
   );
 }
 

@@ -1,3 +1,4 @@
+import type { ModuleMetadata } from '@nestjs/common';
 import type { OutboxTransport } from './transport';
 
 export const OUTBOX_STATUSES = [
@@ -101,6 +102,12 @@ export interface MessagingModuleOptions {
    * claimer uses it to open its own claim transaction.
    */
   drizzleInstanceToken: symbol | string;
+  /**
+   * Modules that provide (and export) the `drizzleInstanceToken`. Required when
+   * that token is not registered by a global module — `MessagingModule` imports
+   * these so it can resolve the Drizzle instance.
+   */
+  imports?: ModuleMetadata['imports'];
   /** The dialect-specific outbox store. */
   outboxStore: OutboxStore;
   /** The dialect-specific inbox store (omit if you only use the outbox half). */

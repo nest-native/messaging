@@ -9,11 +9,11 @@ export default [
       '**/dist/**',
       '**/*.d.ts',
       '**/*.js',
-      'packages/drizzle/test/**',
+      'packages/messaging/test/**',
     ],
   },
   {
-    files: ['packages/drizzle/**/*.ts'],
+    files: ['packages/messaging/**/*.ts'],
     languageOptions: {
       parser: tsParser,
       parserOptions: {

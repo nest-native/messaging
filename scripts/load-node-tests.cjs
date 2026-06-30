@@ -8,7 +8,7 @@ process.env.TS_NODE_PROJECT ??= 'tsconfig.spec.json';
 require('ts-node/register');
 require('reflect-metadata');
 
-const testDirectory = path.join(process.cwd(), 'packages', 'drizzle', 'test');
+const testDirectory = path.join(process.cwd(), 'packages', 'messaging', 'test');
 const files = fs
   .readdirSync(testDirectory)
   .filter(file => file.endsWith('.spec.ts'))

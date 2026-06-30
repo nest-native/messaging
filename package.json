@@ -44,6 +44,7 @@
     "@nestjs/platform-express": "^11.1.27",
     "@nestjs/testing": "^11.1.27",
     "@nest-native/kafka": "^0.2.0",
+    "@electric-sql/pglite": "^0.5.3",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.0.0",
     "@types/pg": "^8.11.10",

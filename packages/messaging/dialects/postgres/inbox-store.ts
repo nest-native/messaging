@@ -11,14 +11,20 @@ type Db = NodePgDatabase<Record<string, never>>;
 
 /**
  * Postgres surfaces a unique-constraint violation with SQLSTATE `23505`
- * (`unique_violation`). node-postgres exposes it as `error.code === '23505'`.
+ * (`unique_violation`). node-postgres exposes it as `error.code === '23505'`;
+ * Drizzle wraps driver errors in a `DrizzleQueryError`, so the code may instead
+ * sit on `error.cause`. Check both so the predicate is robust to wrapping.
  */
 export function isPgUniqueViolation(error: unknown): boolean {
+  return hasCode(error, '23505') || hasCode((error as { cause?: unknown })?.cause, '23505');
+}
+
+function hasCode(error: unknown, code: string): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
-    (error as { code?: unknown }).code === '23505'
+    (error as { code?: unknown }).code === code
   );
 }
 

@@ -41,7 +41,7 @@ export interface MessagingModuleAsyncOptions {
 @Module({})
 export class MessagingModule {
   static forRoot(options: MessagingModuleOptions): DynamicModule {
-    return assemble(options.isGlobal ?? true, [], [
+    return assemble(options.isGlobal ?? true, options.imports ?? [], [
       { provide: MESSAGING_OPTIONS, useValue: options },
       { provide: OUTBOX_STORE, useValue: options.outboxStore },
       { provide: OUTBOX_TRANSPORT, useValue: options.transport },
