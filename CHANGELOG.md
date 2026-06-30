@@ -8,22 +8,34 @@ package release is useful for users.
 
 ## Unreleased
 
-### Changed
+## 0.1.0 - 2026-06-30
 
-- `MessagingModule.forRootAsync`'s `useTransport` factory is typed `(...args: any[])`
-  (matching Nest's own `FactoryProvider.useFactory`) so an idiomatic factory whose
-  parameters match `inject` is assignable under `strict` without casting.
-- `KafkaInboxConsumer`'s `sideEffect` now receives the derived dedup key as its
-  second argument (`(payload, dedupKey) => …`), so consumers can stamp it into
-  their own records.
-  (Both surfaced by dogfooding the reference-app onto the library before release.)
+The first release — the reliable-messaging pair extracted from
+`nest-native/reference-app` into a standalone library.
 
 ### Added
 
-- Initial extraction of the reliable-messaging pair (transactional outbox →
-  Kafka + idempotent inbox) from the `nest-native/reference-app` into a
-  standalone library: the dialect-agnostic core engine (`OutboxProducer`,
-  `OutboxClaimer`, `InboxService`, the `OutboxTransport`/`OutboxStore`/
-  `InboxStore` seams, the wire contract, `MessagingModule`), per-dialect Drizzle
-  stores (better-sqlite3 + Postgres), the `@nest-native/messaging/kafka` adapter,
-  and the `@nest-native/messaging/testing` in-memory harness.
+- **Core engine** (`@nest-native/messaging`): the dialect-agnostic
+  `OutboxProducer`, `OutboxClaimer` + `runWorkerLoop`, `InboxService`, the
+  `OutboxTransport`/`OutboxStore`/`InboxStore` seams, `RetryableError`/
+  `PermanentError`, the wire contract, and `MessagingModule.forRoot`/`forRootAsync`.
+- **Drizzle stores + schema factories** for two dialects:
+  `@nest-native/messaging/sqlite` (better-sqlite3, synchronous) and
+  `@nest-native/messaging/postgres` (node-postgres, async).
+- **Kafka adapter** (`@nest-native/messaging/kafka`): `KafkaOutboxTransport` and
+  the idempotent `KafkaInboxConsumer` engine.
+- **Testing harness** (`@nest-native/messaging/testing`): `InMemoryOutboxTransport`
+  for broker-free tests.
+
+### Notes
+
+These API choices were shaped by dogfooding the reference-app onto the library
+before release:
+
+- `MessagingModule.forRootAsync`'s `useTransport` factory is typed
+  `(...args: any[])` (matching Nest's own `FactoryProvider.useFactory`) so an
+  idiomatic factory whose parameters match `inject` is assignable under `strict`
+  without casting.
+- `KafkaInboxConsumer`'s `sideEffect` receives the derived dedup key as its
+  second argument (`(payload, dedupKey) => …`), so consumers can stamp it into
+  their own records.
