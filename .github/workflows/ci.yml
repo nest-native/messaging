@@ -86,9 +86,6 @@ jobs:
           cp ci-data/cognitive-complexity-summary.json base-cognitive-complexity-summary.json 2>/dev/null || true
 
       - name: Run tests with coverage
-        env:
-          NEST_DRIZZLE_NATIVE_MYSQL_URL: mysql://drizzle:drizzle@127.0.0.1:3306/drizzle
-          NEST_DRIZZLE_NATIVE_POSTGRES_URL: postgresql://drizzle:drizzle@127.0.0.1:5432/drizzle
         run: |
           START=$SECONDS
           npm run test:cov
