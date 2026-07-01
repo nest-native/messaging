@@ -9,7 +9,7 @@
     "test": "npm run typecheck && npm run smoke"
   },
   "dependencies": {
-    "@nest-native/messaging": "0.1.0",
+    "@nest-native/messaging": "0.2.0",
     "@nestjs-cls/transactional": "^3.2.1",
     "@nestjs-cls/transactional-adapter-drizzle-orm": "^1.3.0",
     "@nestjs/common": "^11.1.27",

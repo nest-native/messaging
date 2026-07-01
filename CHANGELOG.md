@@ -8,6 +8,18 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-01
+
+### Added
+
+- **MySQL store** — `@nest-native/messaging/mysql` (mysql2, async): the
+  `outbox_events`/`inbox_events` table factories + the MySQL Outbox/Inbox stores,
+  with `isMysqlUniqueViolation` (errno `1062` / `ER_DUP_ENTRY`, unwrapping
+  `DrizzleQueryError.cause`). `mysql2` is an optional peer.
+- A **gated real-service integration test** (round-trip produce → claim → consume
+  → dedup) that runs against a real database when its connection env is set and
+  skips otherwise, keeping the default suite hermetic.
+
 ## 0.1.0 - 2026-06-30
 
 The first release — the reliable-messaging pair extracted from

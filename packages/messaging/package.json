@@ -1,7 +1,7 @@
 {
   "name": "@nest-native/messaging",
-  "version": "0.1.0",
-  "description": "Transactional outbox + idempotent inbox for NestJS, persisted with Drizzle ORM (SQLite + Postgres), with a Kafka transport",
+  "version": "0.2.0",
+  "description": "Transactional outbox + idempotent inbox for NestJS, persisted with Drizzle ORM (SQLite, Postgres + MySQL), with a Kafka transport",
   "keywords": [
     "nestjs",
     "outbox",
@@ -12,6 +12,8 @@
     "exactly-once",
     "drizzle",
     "kafka",
+    "mysql",
+    "postgres",
     "messaging",
     "typescript"
   ],
@@ -54,6 +56,11 @@
       "require": "./dist/dialects/postgres/index.js",
       "default": "./dist/dialects/postgres/index.js"
     },
+    "./mysql": {
+      "types": "./dist/dialects/mysql/index.d.ts",
+      "require": "./dist/dialects/mysql/index.js",
+      "default": "./dist/dialects/mysql/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -80,6 +87,7 @@
     "@nest-native/kafka": "^0.2.0",
     "better-sqlite3": "^11.0.0 || ^12.0.0",
     "drizzle-orm": "^0.44.0 || ^0.45.0",
+    "mysql2": "^3.0.0",
     "pg": "^8.0.0",
     "reflect-metadata": "^0.1.12 || ^0.2.0",
     "rxjs": "^7.0.0"
@@ -89,6 +97,9 @@
       "optional": true
     },
     "better-sqlite3": {
+      "optional": true
+    },
+    "mysql2": {
       "optional": true
     },
     "pg": {
