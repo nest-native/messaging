@@ -1,0 +1,31 @@
+{
+  "name": "nest-native-messaging-sample-01-kafka",
+  "version": "0.0.0",
+  "private": true,
+  "description": "@nest-native/messaging over the real Kafka transport — outbox → KafkaOutboxTransport → @KafkaConsumer → idempotent inbox, run in-process via @nest-native/kafka's in-memory broker",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke": "ts-node --transpile-only scripts/smoke.ts",
+    "test": "npm run typecheck && npm run smoke"
+  },
+  "dependencies": {
+    "@nest-native/kafka": "^0.2.0",
+    "@nest-native/messaging": "0.2.0",
+    "@nestjs-cls/transactional": "^3.2.1",
+    "@nestjs-cls/transactional-adapter-drizzle-orm": "^1.3.0",
+    "@nestjs/common": "^11.1.27",
+    "@nestjs/core": "^11.1.27",
+    "@nestjs/microservices": "^11.1.27",
+    "better-sqlite3": "^12.11.1",
+    "drizzle-orm": "^0.45.2",
+    "nestjs-cls": "^6.2.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}
