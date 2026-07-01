@@ -58,3 +58,25 @@ The showcase deliberately uses the `InMemoryOutboxTransport` rather than a real
 broker, so it runs anywhere with no Docker or Kafka. Swap in
 `KafkaOutboxTransport` and a thin `@KafkaConsumer` (see the
 [Quick Start](./quick-start.md)) to take the same flow to production.
+
+## `01-kafka`
+
+[`sample/01-kafka`](https://github.com/nest-native/messaging/tree/main/sample/01-kafka)
+takes the showcase one step further: it drives the whole pair over the **real
+Kafka transport** — `KafkaOutboxTransport` on the producer side and an actual
+`@KafkaConsumer` delegating to `KafkaInboxConsumer` on the consumer side — using
+[`@nest-native/kafka`](https://www.npmjs.com/package/@nest-native/kafka)'s
+**in-memory broker** (`KafkaTestModule`), so it still runs with no cluster.
+
+- `app.module.ts` — wires `KafkaTestModule.forRoot()` and
+  `MessagingModule.forRootAsync({ ..., useTransport: (producer) => new KafkaOutboxTransport(producer) })`.
+- `order.consumer.ts` — a thin `@KafkaConsumer('order.placed')` that delegates to
+  the library's `KafkaInboxConsumer.consume(...)`, supplying the payload validator
+  and the exactly-once side effect.
+- `scripts/smoke.ts` — places an order, runs `OutboxClaimer.tick()` (which
+  publishes through Kafka to the consumer), asserts one audit row, then **re-emits
+  the same message** to prove the inbox deduplicates the redelivery.
+
+Run it from the repository root with `npm run sample:focused`. This is the closest
+you can get to the production path without a broker; point `KafkaTestModule` at a
+real cluster (or use `KafkaModule`) and the same code runs unchanged.
