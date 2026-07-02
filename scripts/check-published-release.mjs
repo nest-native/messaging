@@ -124,7 +124,7 @@ function writeConsumerPackage(consumerRoot) {
   const dependencies = {
     '@nestjs/common': devDependencies['@nestjs/common'],
     '@nestjs/core': devDependencies['@nestjs/core'],
-    '@nestjs/testing': devDependencies['@nestjs/testing'],
+    '@nestjs-cls/transactional': devDependencies['@nestjs-cls/transactional'],
     'drizzle-orm': devDependencies['drizzle-orm'],
     [packageName]: version,
     'reflect-metadata': devDependencies['reflect-metadata'],
@@ -163,62 +163,71 @@ function writeConsumerSmoke(consumerRoot) {
 require('reflect-metadata');
 
 const assert = require('node:assert/strict');
-const { Injectable, Module } = require('@nestjs/common');
-const { Test } = require('@nestjs/testing');
-const {
-  DrizzleModule,
-  InjectDrizzle,
-  getDrizzleClientToken,
-} = require('${packageName}');
+const core = require('${packageName}');
+const inProcess = require('${packageName}/in-process');
+const sqlite = require('${packageName}/sqlite');
+const postgres = require('${packageName}/postgres');
+const mysql = require('${packageName}/mysql');
+const testing = require('${packageName}/testing');
 const packageJson = require('${packageName}/package.json');
 
-const fakeClient = {
-  query: {
-    users: {
-      findMany: () => ['Ada', 'Grace'],
-    },
-  },
-};
-const schema = {
-  users: {
-    tableName: 'users',
-  },
-};
-
-class UsersService {
-  constructor(db) {
-    this.db = db;
-  }
-
-  findMany() {
-    return this.db.query.users.findMany();
-  }
+// Every public entry point resolves from the registry install and exports its
+// documented surface.
+for (const name of [
+  'MessagingModule', 'OutboxProducer', 'OutboxClaimer', 'InboxService',
+  'runWorkerLoop', 'RetryableError', 'PermanentError', 'OUTBOX_TRANSPORT',
+  'deriveDedupKey', 'encodeWireValue', 'decodeWireValue',
+]) {
+  assert.ok(name in core, 'missing core export: ' + name);
 }
-InjectDrizzle()(UsersService, undefined, 0);
-Injectable()(UsersService);
+for (const name of ['OutboxRegistry', 'InProcessOutboxTransport']) {
+  assert.ok(name in inProcess, 'missing in-process export: ' + name);
+}
+for (const name of ['SqliteOutboxStore', 'SqliteInboxStore', 'outboxEvents', 'inboxEvents']) {
+  assert.ok(name in sqlite, 'missing sqlite export: ' + name);
+}
+for (const name of ['PostgresOutboxStore', 'PostgresInboxStore', 'outboxEvents', 'inboxEvents']) {
+  assert.ok(name in postgres, 'missing postgres export: ' + name);
+}
+for (const name of ['MysqlOutboxStore', 'MysqlInboxStore', 'outboxEvents', 'inboxEvents']) {
+  assert.ok(name in mysql, 'missing mysql export: ' + name);
+}
+assert.ok('InMemoryOutboxTransport' in testing, 'missing testing export');
+assert.ok(packageJson.exports['./kafka'], 'missing ./kafka subpath export');
 
-class AppModule {}
-Module({
-  imports: [
-    DrizzleModule.forRoot({
-      connection: fakeClient,
-      isGlobal: false,
-      schema,
-    }),
-  ],
-  providers: [UsersService],
-})(AppModule);
+// The published package declares zero runtime dependencies (consumers only pull
+// the peers they actually use).
+assert.equal(
+  Object.keys(packageJson.dependencies ?? {}).length,
+  0,
+  'The published package must not declare runtime dependencies.',
+);
 
+// Functional smoke: the in-memory transport records a publish, and the
+// in-process transport dispatches to a registered handler (no broker, no DB).
 (async () => {
-  const moduleRef = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
+  const transport = new testing.InMemoryOutboxTransport();
+  await transport.publish({ id: 'e1', topic: 'demo', payload: { ok: true } });
+  assert.equal(transport.list().length, 1);
+  assert.equal(transport.list()[0].topic, 'demo');
+  assert.ok(new core.RetryableError('x', 100).delayMs === 100);
 
-  assert.equal(moduleRef.get(getDrizzleClientToken()), fakeClient);
-  assert.deepEqual(moduleRef.get(UsersService).findMany(), ['Ada', 'Grace']);
-  assert.deepEqual(packageJson.dependencies ?? {}, {});
-
-  await moduleRef.close();
+  const registry = new inProcess.OutboxRegistry();
+  let handled;
+  registry.register('demo', payload => {
+    handled = payload;
+    return 'completed';
+  });
+  await new inProcess.InProcessOutboxTransport(registry).publish({
+    id: 'e2', topic: 'demo', payload: { ok: 1 },
+  });
+  assert.equal(handled.ok, 1);
+  await assert.rejects(
+    () => new inProcess.InProcessOutboxTransport(registry).publish({
+      id: 'e3', topic: 'unrouted', payload: {},
+    }),
+    core.PermanentError,
+  );
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
