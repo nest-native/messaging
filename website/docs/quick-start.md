@@ -121,9 +121,12 @@ export class AppModule {
 }
 ```
 
-The `transport` is the only piece that differs between tests and production. The
-showcase uses `InMemoryOutboxTransport`; in production you bind the Kafka
-transport — see [step 7](#7-relay-to-kafka-in-production).
+The `transport` is the only piece that differs between environments: the
+in-memory transport (`@nest-native/messaging/testing`, used above) for tests,
+`InProcessOutboxTransport` (`@nest-native/messaging/in-process`) when your
+consumers live in the same process — the no-broker default profile the
+[`00-showcase` sample](./samples.md) runs — or the Kafka transport for a real
+broker, see [step 7](#7-relay-to-kafka-in-production).
 
 ## 5. Enqueue inside your transaction
 

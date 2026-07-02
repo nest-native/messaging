@@ -5,6 +5,13 @@ import type { SqliteOutboxStore } from '@nest-native/messaging/sqlite';
 import type { AppDatabase } from './database';
 import { orders } from './schema';
 
+// A plain interface (no index signature) — enqueue accepts it directly, no
+// `as unknown as Record<string, unknown>` cast.
+export interface OrderPlacedPayload {
+  id: string;
+  item: string;
+}
+
 /**
  * Places an order and enqueues the `order.placed` event in the SAME transaction
  * — the dual-write guarantee. The body is synchronous (better-sqlite3), so
@@ -20,9 +27,10 @@ export class OrderService {
   @Transactional()
   placeOrder(id: string, item: string): Promise<void> {
     this.db.insert(orders).values({ id, item }).run();
+    const payload: OrderPlacedPayload = { id, item };
     this.producer.enqueue({
       topic: 'order.placed',
-      payload: { id, item },
+      payload,
       idempotencyKey: `order:${id}`,
     });
     return undefined as unknown as Promise<void>;

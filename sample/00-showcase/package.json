@@ -2,14 +2,14 @@
   "name": "nest-native-messaging-showcase",
   "version": "0.0.0",
   "private": true,
-  "description": "End-to-end showcase for @nest-native/messaging: outbox → in-memory transport → idempotent inbox on SQLite",
+  "description": "End-to-end showcase for @nest-native/messaging: outbox → in-process transport (registry handler) → idempotent inbox on SQLite",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "smoke": "ts-node --transpile-only scripts/smoke.ts",
     "test": "npm run typecheck && npm run smoke"
   },
   "dependencies": {
-    "@nest-native/messaging": "0.2.0",
+    "@nest-native/messaging": "0.3.0",
     "@nestjs-cls/transactional": "^3.2.1",
     "@nestjs-cls/transactional-adapter-drizzle-orm": "^1.3.0",
     "@nestjs/common": "^11.1.27",

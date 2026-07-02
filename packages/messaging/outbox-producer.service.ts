@@ -24,7 +24,11 @@ export class OutboxProducer<TStore extends OutboxStore = OutboxStore> {
     @Inject(OUTBOX_STORE) private readonly store: TStore,
   ) {}
 
-  enqueue(input: EnqueueInput): ReturnType<TStore['enqueue']> {
+  // TPayload keeps the input structural: a payload typed as a plain interface
+  // compiles without casting (see EnqueueInput). The store widens it internally.
+  enqueue<TPayload extends object>(
+    input: EnqueueInput<TPayload>,
+  ): ReturnType<TStore['enqueue']> {
     return this.store.enqueue(this.db, input) as ReturnType<TStore['enqueue']>;
   }
 }

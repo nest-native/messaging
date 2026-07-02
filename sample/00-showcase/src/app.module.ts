@@ -4,11 +4,15 @@ import { TransactionalAdapterDrizzleOrm } from '@nestjs-cls/transactional-adapte
 import { ClsModule } from 'nestjs-cls';
 import { MessagingModule } from '@nest-native/messaging';
 import {
+  InProcessOutboxTransport,
+  OutboxRegistry,
+} from '@nest-native/messaging/in-process';
+import {
   SqliteInboxStore,
   SqliteOutboxStore,
 } from '@nest-native/messaging/sqlite';
-import { InMemoryOutboxTransport } from '@nest-native/messaging/testing';
 import { type AppDatabase, DRIZZLE } from './database';
+import { OrderPlacedHandler } from './order-placed.handler';
 import { OrderService } from './order.service';
 
 // A global module exporting the Drizzle instance, so both the CLS adapter and
@@ -18,13 +22,18 @@ class DbModule {}
 
 @Module({})
 export class AppModule {
-  static register(db: AppDatabase, transport: InMemoryOutboxTransport): DynamicModule {
+  static register(db: AppDatabase): DynamicModule {
     const dbModule: DynamicModule = {
       module: DbModule,
       global: true,
       providers: [{ provide: DRIZZLE, useValue: db }],
       exports: [DRIZZLE],
     };
+    // The in-process (no-broker) default profile: the claimer "publishes" by
+    // dispatching to the handler registered for the topic. The same instance
+    // backs the transport AND the OutboxRegistry provider, so handlers register
+    // into the registry the transport reads from.
+    const registry = new OutboxRegistry();
     return {
       module: AppModule,
       imports: [
@@ -44,10 +53,14 @@ export class AppModule {
           drizzleInstanceToken: DRIZZLE,
           outboxStore: new SqliteOutboxStore(),
           inboxStore: new SqliteInboxStore(),
-          transport,
+          transport: new InProcessOutboxTransport(registry),
         }),
       ],
-      providers: [OrderService],
+      providers: [
+        { provide: OutboxRegistry, useValue: registry },
+        OrderPlacedHandler,
+        OrderService,
+      ],
       exports: [OrderService],
     };
   }

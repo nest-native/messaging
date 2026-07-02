@@ -18,14 +18,15 @@ type Db = BetterSQLite3Database<Record<string, never>>;
  * resolved Promise for the engine to await from outside the transaction.
  */
 export class SqliteOutboxStore implements OutboxStore {
-  enqueue(db: unknown, input: EnqueueInput): OutboxEventRow {
+  enqueue(db: unknown, input: EnqueueInput<object>): OutboxEventRow {
     const now = new Date().toISOString();
     return (db as Db)
       .insert(outboxEvents)
       .values({
         id: randomUUID(),
         topic: input.topic,
-        payload: input.payload,
+        // The one place the structural input payload widens to the stored shape.
+        payload: input.payload as Record<string, unknown>,
         status: 'pending',
         maxAttempts: input.maxAttempts ?? 10,
         idempotencyKey: input.idempotencyKey ?? null,

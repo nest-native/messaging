@@ -52,6 +52,19 @@ describe('SqliteOutboxStore', () => {
     assert.equal(row.maxAttempts, 10);
   });
 
+  test('enqueue accepts a payload typed as a plain interface — no cast', () => {
+    // Compile-level regression: an interface has no index signature, so it is
+    // not assignable to Record<string, unknown>; the store seam takes
+    // EnqueueInput<object> and widens the stored payload internally.
+    interface OrderPlaced {
+      orderId: string;
+      qty: number;
+    }
+    const payload: OrderPlaced = { orderId: 'o-1', qty: 2 };
+    const row = store.enqueue(db, { topic: 'order.placed', payload });
+    assert.deepEqual(row.payload, { orderId: 'o-1', qty: 2 });
+  });
+
   test('enqueue honours availableAt and maxAttempts; null idempotency key', () => {
     const at = new Date(Date.now() + 60_000);
     const row = store.enqueue(db, {

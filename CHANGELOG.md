@@ -8,6 +8,37 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-01
+
+Both changes come from dogfooding the reference-app onto 0.2.0.
+
+### Added
+
+- **In-process transport** — `@nest-native/messaging/in-process`: `OutboxRegistry`
+  (topic → handler) + `InProcessOutboxTransport`, the no-broker default profile
+  the README always promised (previously every app had to hand-roll it). The
+  transport maps handler outcomes for the claimer: no handler registered →
+  `PermanentError` (the row fails immediately), `{ retryAfterMs }` →
+  `RetryableError` with that delay, a handler throw → propagates untouched into
+  the claimer's generic retry/backoff. Handlers receive `(payload, message)` so
+  they can derive the dedup key (`idempotencyKey ?? id`) and pair with
+  `InboxService.runOnce`; delivery is at-least-once via the claimer, so handlers
+  must be idempotent or use the inbox. Depends only on `@nestjs/common`.
+- The `00-showcase` sample now runs the in-process profile end to end (registry
+  handler + inbox pairing) instead of the `/testing` in-memory transport.
+
+### Changed
+
+- **`enqueue` accepts structurally-typed payloads** — `EnqueueInput` is now
+  generic (`EnqueueInput<TPayload extends object = Record<string, unknown>>`)
+  and `OutboxProducer.enqueue<TPayload extends object>` threads it through, so a
+  payload typed as a plain interface (no index signature) compiles without
+  `as unknown as Record<string, unknown>` casts. Non-breaking: the default type
+  argument preserves the old shape, `OutboxStore.enqueue` now takes
+  `EnqueueInput<object>` (parameter bivariance keeps existing custom stores
+  assignable), and the stored row payload stays `Record<string, unknown>` — the
+  dialect stores widen internally, exactly once.
+
 ## 0.2.0 - 2026-07-01
 
 ### Added

@@ -6,13 +6,14 @@ title: Introduction
 # @nest-native/messaging
 
 Transactional **outbox** + idempotent **inbox** for NestJS — persisted with
-Drizzle ORM (SQLite and Postgres), delivered over Kafka.
+Drizzle ORM (SQLite, Postgres, and MySQL), delivered in-process or over Kafka.
 
-:::note v0.1.x — early but stable
+:::note v0.x — early but stable
 The producer, claimer, inbox, transport seam, and the Drizzle stores are
-implemented and tested at 100% coverage. SQLite and Postgres are supported;
-MySQL and additional transports are on the roadmap. This is a community project
-in the `nest-native` family and is **not** affiliated with the NestJS core team.
+implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are
+supported, with in-process (no broker) and Kafka transports. This is a community
+project in the `nest-native` family and is **not** affiliated with the NestJS
+core team.
 :::
 
 ## The dual-write problem
@@ -49,8 +50,10 @@ pattern, done natively for the Drizzle + Kafka + NestJS stack.
 | Import | Contents |
 | --- | --- |
 | `@nest-native/messaging` | core engine — `OutboxProducer`, `OutboxClaimer` + `runWorkerLoop`, `InboxService`, the `OutboxTransport` / `OutboxStore` / `InboxStore` seams, the wire contract, `MessagingModule` |
+| `@nest-native/messaging/in-process` | the no-broker default transport — `OutboxRegistry` (topic → handler) + `InProcessOutboxTransport` |
 | `@nest-native/messaging/sqlite` | better-sqlite3 (synchronous) stores + `outbox_events` / `inbox_events` table factories |
 | `@nest-native/messaging/postgres` | node-postgres (asynchronous) stores + table factories |
+| `@nest-native/messaging/mysql` | mysql2 (asynchronous) stores + table factories |
 | `@nest-native/messaging/kafka` | `KafkaOutboxTransport` + the idempotent `KafkaInboxConsumer`, over `@nest-native/kafka` |
 | `@nest-native/messaging/testing` | in-memory transport for broker-free tests |
 
@@ -62,19 +65,25 @@ pattern, done natively for the Drizzle + Kafka + NestJS stack.
    `MessagingModule.forRoot({ drizzleInstanceToken, outboxStore, inboxStore, transport })`.
 3. Inject `OutboxProducer` into your `@Transactional()` services and `enqueue()`
    alongside your business writes.
-4. Run `OutboxClaimer` in a worker (`runWorkerLoop`) to relay events to the
-   broker.
-5. Consume with a thin `@KafkaConsumer` that delegates to `KafkaInboxConsumer`.
+4. Run `OutboxClaimer` in a worker (`runWorkerLoop`) to relay events through
+   the transport.
+5. Consume in-process by registering a handler per topic on the
+   `OutboxRegistry`, or over Kafka with a thin `@KafkaConsumer` that delegates
+   to `KafkaInboxConsumer`. Delivery is at-least-once either way — make handlers
+   idempotent or pair them with the inbox.
 
 Continue to the [Quick Start](./quick-start.md) for a runnable end-to-end setup,
 or the [API Reference](./api-reference.md) for the full surface.
 
 ## Status and scope
 
-- **Drivers:** SQLite (better-sqlite3, synchronous) and Postgres (`pg`,
-  asynchronous) via per-dialect stores. You may provide your own store.
-- **Transports:** Kafka (`@nest-native/kafka`) and in-process / in-memory.
-- **Roadmap:** a MySQL store and additional transports.
+- **Drivers:** SQLite (better-sqlite3, synchronous), Postgres (`pg`,
+  asynchronous), and MySQL (`mysql2`, asynchronous) via per-dialect stores. You
+  may provide your own store.
+- **Transports:** in-process (default, `@nest-native/messaging/in-process` — no
+  broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`), plus
+  an in-memory one for tests.
+- **Roadmap:** additional transports.
 - **Out of scope:** CDC (Debezium) log-tailing is an intentional non-goal — this
   is the application-level outbox, written through your ORM transaction. Generic
   multi-broker routing is also out of scope.

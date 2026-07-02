@@ -33,10 +33,19 @@ export interface OutboxEventRow {
   createdAt: string;
 }
 
-/** What a caller supplies to enqueue an event into the outbox. */
-export interface EnqueueInput {
+/**
+ * What a caller supplies to enqueue an event into the outbox.
+ *
+ * `TPayload` keeps the payload **structural**: a value typed as a plain
+ * interface (which has no index signature, so it is not assignable to
+ * `Record<string, unknown>`) is accepted as-is — no `as unknown as
+ * Record<string, unknown>` at every call site. The stored row shape stays
+ * `Record<string, unknown>` (see {@link OutboxEventRow}); the dialect stores
+ * perform that widening internally, exactly once.
+ */
+export interface EnqueueInput<TPayload extends object = Record<string, unknown>> {
   topic: string;
-  payload: Record<string, unknown>;
+  payload: TPayload;
   idempotencyKey?: string;
   availableAt?: Date;
   maxAttempts?: number;
@@ -70,9 +79,13 @@ export type RunOnceOutcome = 'processed' | 'duplicate';
  * `enqueue` returns the store's native shape — the **sqlite** store returns a
  * synchronous `OutboxEventRow` (so it can be called inside a synchronous
  * `@Transactional` body); the **postgres** store returns a `Promise`.
+ *
+ * `enqueue` accepts `EnqueueInput<object>` so any structurally-typed payload
+ * (every `EnqueueInput<TPayload>`) flows through; the store widens the payload
+ * to the stored `Record<string, unknown>` shape internally.
  */
 export interface OutboxStore {
-  enqueue(db: unknown, input: EnqueueInput): OutboxEventRow | Promise<OutboxEventRow>;
+  enqueue(db: unknown, input: EnqueueInput<object>): OutboxEventRow | Promise<OutboxEventRow>;
   claimBatch(db: unknown, cfg: ResolvedClaimerConfig): Promise<OutboxEventRow[]>;
   markCompleted(db: unknown, id: string): Promise<void>;
   retry(db: unknown, id: string, delayMs: number, lastError?: string): Promise<void>;

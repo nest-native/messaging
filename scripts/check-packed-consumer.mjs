@@ -124,8 +124,10 @@ require('reflect-metadata');
 
 const assert = require('node:assert/strict');
 const core = require('@nest-native/messaging');
+const inProcess = require('@nest-native/messaging/in-process');
 const sqlite = require('@nest-native/messaging/sqlite');
 const postgres = require('@nest-native/messaging/postgres');
+const mysql = require('@nest-native/messaging/mysql');
 const testing = require('@nest-native/messaging/testing');
 const packageJson = require('@nest-native/messaging/package.json');
 
@@ -138,11 +140,17 @@ for (const name of [
 ]) {
   assert.ok(name in core, 'missing core export: ' + name);
 }
+for (const name of ['OutboxRegistry', 'InProcessOutboxTransport']) {
+  assert.ok(name in inProcess, 'missing in-process export: ' + name);
+}
 for (const name of ['SqliteOutboxStore', 'SqliteInboxStore', 'outboxEvents', 'inboxEvents']) {
   assert.ok(name in sqlite, 'missing sqlite export: ' + name);
 }
 for (const name of ['PostgresOutboxStore', 'PostgresInboxStore', 'outboxEvents', 'inboxEvents']) {
   assert.ok(name in postgres, 'missing postgres export: ' + name);
+}
+for (const name of ['MysqlOutboxStore', 'MysqlInboxStore', 'outboxEvents', 'inboxEvents']) {
+  assert.ok(name in mysql, 'missing mysql export: ' + name);
 }
 assert.ok('InMemoryOutboxTransport' in testing, 'missing testing export');
 assert.ok(packageJson.exports['./kafka'], 'missing ./kafka subpath export');
@@ -155,13 +163,31 @@ assert.equal(
   'The packed package must not declare runtime dependencies.',
 );
 
-// Functional smoke: the in-memory transport records a publish (no broker, no DB).
+// Functional smoke: the in-memory transport records a publish, and the
+// in-process transport dispatches to a registered handler (no broker, no DB).
 (async () => {
   const transport = new testing.InMemoryOutboxTransport();
   await transport.publish({ id: 'e1', topic: 'demo', payload: { ok: true } });
   assert.equal(transport.list().length, 1);
   assert.equal(transport.list()[0].topic, 'demo');
   assert.ok(new core.RetryableError('x', 100).delayMs === 100);
+
+  const registry = new inProcess.OutboxRegistry();
+  let handled;
+  registry.register('demo', payload => {
+    handled = payload;
+    return 'completed';
+  });
+  await new inProcess.InProcessOutboxTransport(registry).publish({
+    id: 'e2', topic: 'demo', payload: { ok: 1 },
+  });
+  assert.equal(handled.ok, 1);
+  await assert.rejects(
+    () => new inProcess.InProcessOutboxTransport(registry).publish({
+      id: 'e3', topic: 'unrouted', payload: {},
+    }),
+    core.PermanentError,
+  );
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
