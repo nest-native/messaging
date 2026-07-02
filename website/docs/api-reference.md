@@ -17,17 +17,24 @@ Injectable. Writes events into the outbox inside the caller's transaction.
 
 ```ts
 class OutboxProducer<TStore extends OutboxStore = OutboxStore> {
-  enqueue(input: EnqueueInput): ReturnType<TStore['enqueue']>;
+  enqueue<TPayload extends object>(
+    input: EnqueueInput<TPayload>,
+  ): ReturnType<TStore['enqueue']>;
 }
 
-interface EnqueueInput {
+interface EnqueueInput<TPayload extends object = Record<string, unknown>> {
   topic: string;
-  payload: Record<string, unknown>;
+  payload: TPayload;
   idempotencyKey?: string;
   availableAt?: Date;
   maxAttempts?: number;
 }
 ```
+
+The payload input is **structural**: a value typed as a plain interface (which
+has no index signature, so it is not assignable to `Record<string, unknown>`)
+is accepted as-is — no cast. The stored row shape stays
+`Record<string, unknown>`; the dialect stores widen internally.
 
 `enqueue` returns the store's native shape: the **sqlite** store returns the
 `OutboxEventRow` synchronously (call it without `await` inside a synchronous
@@ -176,7 +183,7 @@ you.
 
 ```ts
 interface OutboxStore {
-  enqueue(db: unknown, input: EnqueueInput): OutboxEventRow | Promise<OutboxEventRow>;
+  enqueue(db: unknown, input: EnqueueInput<object>): OutboxEventRow | Promise<OutboxEventRow>;
   claimBatch(db: unknown, cfg: ResolvedClaimerConfig): Promise<OutboxEventRow[]>;
   markCompleted(db: unknown, id: string): Promise<void>;
   retry(db: unknown, id: string, delayMs: number, lastError?: string): Promise<void>;
@@ -219,6 +226,61 @@ function decodeWireValue(value: string | Buffer | null): unknown;
 The dedup-key order is the contract: `x-event-id` → `x-idempotency-key` → broker
 message key.
 
+## `@nest-native/messaging/in-process`
+
+The no-broker default transport: the claimer "publishes" a claimed event by
+dispatching it to the handler registered for its topic, in the same process.
+Depends only on `@nestjs/common` (already a required peer).
+
+### `OutboxRegistry`
+
+Injectable. The topic → handler registry behind the transport. Consumers
+register themselves on module init; one handler per topic (a second `register`
+for the same topic throws at startup).
+
+```ts
+class OutboxRegistry {
+  register(topic: string, handler: OutboxHandler): void;
+  get(topic: string): OutboxHandler | undefined;
+}
+
+type OutboxHandler = (
+  payload: Record<string, unknown>,
+  message: OutboxMessage,
+) => Promise<OutboxHandlerResult> | OutboxHandlerResult;
+
+type OutboxHandlerResult = 'completed' | { retryAfterMs: number };
+```
+
+The handler receives the stored payload plus the full `OutboxMessage`, so it can
+derive the same dedup key the Kafka consumer would (`idempotencyKey ?? id`) and
+pair with `InboxService.runOnce` for exactly-once side effects.
+
+### `InProcessOutboxTransport`
+
+```ts
+class InProcessOutboxTransport implements OutboxTransport {
+  constructor(registry: OutboxRegistry);
+  publish(message: OutboxMessage): Promise<void>;
+}
+```
+
+`publish` looks up the topic's handler and maps the outcome for the claimer:
+
+- **no handler registered** → `PermanentError` — the event is unroutable and can
+  never succeed, so the row fails immediately;
+- **`'completed'`** → resolves; the claimer marks the row completed;
+- **`{ retryAfterMs }`** → `RetryableError` carrying that delay;
+- **a handler throw** → propagates untouched into the claimer's error mapping: a
+  thrown `PermanentError` fails the row now (e.g. a malformed payload), a thrown
+  `RetryableError` keeps its delay, anything else retries with backoff until
+  `maxAttempts`.
+
+Delivery is **at-least-once** via the claimer (it redelivers after a retry or a
+crash between handler success and `markCompleted`), so handlers must be
+idempotent — or wrap their side effect in the inbox. The
+[`00-showcase` sample](./samples.md) runs this profile end to end.
+
 ## `@nest-native/messaging/sqlite`
 
 better-sqlite3 (synchronous) dialect.
@@ -241,6 +303,17 @@ node-postgres (asynchronous) dialect. Same shape as `/sqlite`:
 | `PostgresOutboxStore` | class | implements `OutboxStore`; `enqueue` returns a `Promise` |
 | `PostgresInboxStore` | class | implements `InboxStore`; an async DB-only `runOnce` handler is allowed |
 | `isPgUniqueViolation` | function | `(error: unknown) => boolean` |
+
+## `@nest-native/messaging/mysql`
+
+mysql2 (asynchronous) dialect. Same shape as `/postgres`:
+
+| Export | Kind | Notes |
+| --- | --- | --- |
+| `outboxEvents` / `inboxEvents` | Drizzle tables | `mysqlTable` factories with the matching indexes |
+| `MysqlOutboxStore` | class | implements `OutboxStore`; `enqueue` returns a `Promise` (no `RETURNING` in MySQL — it inserts, then reads the row back by id) |
+| `MysqlInboxStore` | class | implements `InboxStore`; an async DB-only `runOnce` handler is allowed |
+| `isMysqlUniqueViolation` | function | `(error: unknown) => boolean` — errno `1062` / `ER_DUP_ENTRY`, unwrapping `DrizzleQueryError.cause` |
 
 ## `@nest-native/messaging/kafka`
 

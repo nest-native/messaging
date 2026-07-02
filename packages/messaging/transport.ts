@@ -5,8 +5,10 @@
 
 /**
  * Injection token for the active {@link OutboxTransport}. `MessagingModule`
- * binds it to the in-process transport by default; the Kafka profile rebinds it
- * to the Kafka transport.
+ * binds it to the transport you supply — the in-process transport
+ * (`@nest-native/messaging/in-process`) for the no-broker default profile, the
+ * Kafka transport (`@nest-native/messaging/kafka`) for a real broker, or the
+ * in-memory one (`@nest-native/messaging/testing`) in tests.
  */
 export const OUTBOX_TRANSPORT = Symbol.for('@nest-native/messaging:outbox-transport');
 

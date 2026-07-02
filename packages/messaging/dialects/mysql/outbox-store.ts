@@ -21,13 +21,14 @@ type Db = MySql2Database<Record<string, never>>;
  * transaction to return the canonical {@link OutboxEventRow}.
  */
 export class MysqlOutboxStore implements OutboxStore {
-  async enqueue(db: unknown, input: EnqueueInput): Promise<OutboxEventRow> {
+  async enqueue(db: unknown, input: EnqueueInput<object>): Promise<OutboxEventRow> {
     const id = randomUUID();
     const now = new Date().toISOString();
     await (db as Db).insert(outboxEvents).values({
       id,
       topic: input.topic,
-      payload: input.payload,
+      // The one place the structural input payload widens to the stored shape.
+      payload: input.payload as Record<string, unknown>,
       status: 'pending',
       maxAttempts: input.maxAttempts ?? 10,
       idempotencyKey: input.idempotencyKey ?? null,

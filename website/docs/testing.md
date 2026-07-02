@@ -39,11 +39,18 @@ transport.reset(); // clear recorded messages + any injected failure
 It is kept out of the package root on purpose, so test scaffolding never enters
 your production import surface.
 
+:::tip `/testing` vs `/in-process`
+`InMemoryOutboxTransport` **records** published messages for assertions — use it
+in tests. `InProcessOutboxTransport` (`@nest-native/messaging/in-process`)
+**dispatches** them to registered handlers — that one is a production profile,
+not a test double, though it also happens to need no broker.
+:::
+
 ## A broker-free end-to-end test
 
-This mirrors the [`00-showcase` sample](./samples.md): place an order (atomic
-outbox write), drain it with the claimer, then deliver it to the inbox twice and
-assert the side effect ran exactly once.
+This mirrors the flow of the [`00-showcase` sample](./samples.md): place an
+order (atomic outbox write), drain it with the claimer, then deliver it to the
+inbox twice and assert the side effect ran exactly once.
 
 ```ts
 import { InboxService, OutboxClaimer } from '@nest-native/messaging';

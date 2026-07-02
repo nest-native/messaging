@@ -8,9 +8,9 @@ title: Samples
 ## `00-showcase`
 
 [`sample/00-showcase`](https://github.com/nest-native/messaging/tree/main/sample/00-showcase)
-is a runnable, end-to-end demonstration of the whole pattern on **SQLite**, with
-no broker and no migration step (it creates the tables inline so it runs as a
-single script). It is wired exactly like the [Quick Start](./quick-start.md):
+is a runnable, end-to-end demonstration of the whole pattern on **SQLite** and
+the **in-process transport** — the no-broker default profile — with no migration
+step (it creates the tables inline so it runs as a single script):
 
 - `schema.ts` — the library's `outboxEvents` / `inboxEvents` factories combined
   with the business `orders` table and an `order_audit` table (the consumer's
@@ -18,31 +18,37 @@ single script). It is wired exactly like the [Quick Start](./quick-start.md):
 - `app.module.ts` — a global Drizzle module, `ClsModule.forRoot` with the Drizzle
   transactional adapter (`enableTransactionProxy: true`), and
   `MessagingModule.forRoot` with `SqliteOutboxStore`, `SqliteInboxStore`, and an
-  `InMemoryOutboxTransport`.
+  `InProcessOutboxTransport` over a shared `OutboxRegistry`.
 - `order.service.ts` — `placeOrder` inserts the order row and `enqueue`s the
-  `order.placed` event in the **same** `@Transactional()` method.
+  `order.placed` event in the **same** `@Transactional()` method. The payload is
+  a plain interface — `enqueue` accepts it without casts.
+- `order-placed.handler.ts` — the consumer: it registers itself for
+  `order.placed` on module init and pairs with `InboxService.runOnce` (keyed on
+  `idempotencyKey ?? id`) so the audit row is written exactly once.
 - `scripts/smoke.ts` — drives the flow and asserts each guarantee.
 
 ## What it proves
 
-The smoke script asserts the three properties that make the pattern correct:
+The smoke script asserts the properties that make the pattern correct:
 
 1. **Atomic outbox** — after `placeOrder`, both the `orders` row and exactly one
    `outbox_events` row exist. They committed in the same transaction, so there is
    no event without the work and no work without the event.
-2. **Claim and relay** — one `OutboxClaimer.tick()` publishes the committed event
-   to the transport and marks the row completed (`report.completed === 1`). In
-   production the Kafka transport publishes to a broker instead; the in-memory
-   transport records it.
-3. **Exactly-once inbox** — delivering the message to `InboxService.runOnce` the
-   first time returns `'processed'` and writes one `order_audit` row; a second,
-   identical delivery (brokers are at-least-once) returns `'duplicate'` and writes
-   **no** second row. The side effect ran exactly once.
+2. **Claim and dispatch** — one `OutboxClaimer.tick()` delivers the committed
+   event to the registered handler and marks the row completed
+   (`report.completed === 1`). In production with a broker, the Kafka transport
+   publishes instead — same seam, different transport.
+3. **Exactly-once inbox** — the handler's first delivery writes one
+   `order_audit` row; replaying the same logical event (delivery is
+   at-least-once) is deduplicated by the inbox and writes **no** second row.
+4. **Unroutable events fail fast** — an event on a topic with no registered
+   handler maps to `PermanentError`, so the claimer fails the row immediately
+   instead of retrying forever.
 
 On success it prints:
 
 ```
-Showcase smoke passed: atomic outbox → claim → exactly-once inbox.
+Showcase smoke passed: atomic outbox → in-process dispatch → exactly-once inbox.
 ```
 
 ## Running it
@@ -54,8 +60,7 @@ npm install
 npm run showcase
 ```
 
-The showcase deliberately uses the `InMemoryOutboxTransport` rather than a real
-broker, so it runs anywhere with no Docker or Kafka. Swap in
+The showcase runs the in-process default profile — no Docker, no Kafka. Rebind
 `KafkaOutboxTransport` and a thin `@KafkaConsumer` (see the
 [Quick Start](./quick-start.md)) to take the same flow to production.
 

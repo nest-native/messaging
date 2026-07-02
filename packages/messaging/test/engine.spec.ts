@@ -49,6 +49,13 @@ CREATE TABLE deliveries (key TEXT PRIMARY KEY);
 const DRIZZLE = Symbol('test-drizzle');
 type Db = BetterSQLite3Database<Record<string, never>>;
 
+// Compile-level regression for EnqueueInput<TPayload>: a payload typed as a
+// plain interface (NO index signature, so NOT assignable to
+// Record<string, unknown>) must be accepted by enqueue without any cast.
+interface WidgetCreated {
+  name: string;
+}
+
 @Injectable()
 class WidgetService {
   constructor(
@@ -60,9 +67,10 @@ class WidgetService {
   // commit atomically; a throw rolls both back.
   @Transactional()
   create(name: string, fail = false): Promise<OutboxEventRow> {
+    const payload: WidgetCreated = { name };
     const row = this.producer.enqueue({
       topic: 'widget.created',
-      payload: { name },
+      payload,
       idempotencyKey: `widget:${name}`,
     });
     this.db.run(sql`INSERT INTO widgets (name) VALUES (${name})`);

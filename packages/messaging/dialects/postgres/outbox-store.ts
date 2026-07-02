@@ -18,14 +18,15 @@ type Db = NodePgDatabase<Record<string, never>>;
  * transaction.
  */
 export class PostgresOutboxStore implements OutboxStore {
-  async enqueue(db: unknown, input: EnqueueInput): Promise<OutboxEventRow> {
+  async enqueue(db: unknown, input: EnqueueInput<object>): Promise<OutboxEventRow> {
     const now = new Date().toISOString();
     const [row] = await (db as Db)
       .insert(outboxEvents)
       .values({
         id: randomUUID(),
         topic: input.topic,
-        payload: input.payload,
+        // The one place the structural input payload widens to the stored shape.
+        payload: input.payload as Record<string, unknown>,
         status: 'pending',
         maxAttempts: input.maxAttempts ?? 10,
         idempotencyKey: input.idempotencyKey ?? null,
