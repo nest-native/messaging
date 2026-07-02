@@ -1,6 +1,5 @@
 import 'reflect-metadata';
 import { strict as assert } from 'node:assert';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { NestFactory } from '@nestjs/core';
 import { OutboxClaimer } from '@nest-native/messaging';
 import {
@@ -32,7 +31,7 @@ async function main(): Promise<void> {
   //    consumes it and the inbox applies the side effect exactly once.
   const report = await app.get(OutboxClaimer).tick();
   assert.equal(report.completed, 1, 'event published to Kafka + row completed');
-  await sleep(50); // let the broker dispatch to the async consumer handler
+  await broker.idle(); // settle point: every in-flight handler pipeline has finished
   assert.equal(count('order_audit'), 1, 'consumer wrote one delivery audit row');
 
   // 3. Redelivery (Kafka is at-least-once): re-emit the exact published message.
@@ -40,7 +39,7 @@ async function main(): Promise<void> {
   const published = broker.getSentTo(ORDER_TOPIC)[0];
   assert.ok(published, 'the transport published to the order topic');
   await broker.emit(ORDER_TOPIC, published);
-  await sleep(50);
+  await broker.idle();
   assert.equal(count('order_audit'), 1, 'redelivery deduplicated — side effect ran once');
 
   await app.close();

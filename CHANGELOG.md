@@ -8,6 +8,28 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-01
+
+### Fixed
+
+- **The `@nest-native/kafka` optional-peer range excluded kafka 0.3.x** — the
+  peer was declared `^0.2.0`, which on a 0.x line means `>=0.2.0 <0.3.0`, so
+  installing the messaging + kafka pair with `@nest-native/kafka@^0.3.0` failed
+  with `ERESOLVE` (or, in workspace layouts, silently split kafka into two
+  copies, breaking `KafkaInboxConsumer`'s injection of `KafkaProducerService`).
+  Widened to `^0.2.0 || ^0.3.0`; kafka 0.3.0 is additive on the surface the
+  `/kafka` entrypoint uses.
+
+### Samples & tooling
+
+- `sample/01-kafka` now runs on `@nest-native/kafka@^0.3.0` and settles with
+  `await broker.idle()` (the 0.3.0 testing API) instead of fixed `sleep(50)`
+  waits after produce/emit.
+- `scripts/check-published-release.mjs`'s embedded consumer smoke now validates
+  this package's entry points (core, `/in-process`, `/sqlite`, `/postgres`,
+  `/mysql`, `/testing`) against the registry install — it was an unadapted copy
+  from the drizzle repo and failed for every published version.
+
 ## 0.3.0 - 2026-07-01
 
 Both changes come from dogfooding the reference-app onto 0.2.0.
