@@ -1,0 +1,39 @@
+# Optional local infrastructure for the gated driver integration specs.
+# Nothing in the default `npm test` path or CI needs this — forks work
+# without Docker. See GUIDELINES_NEST_MESSAGING.md, "Local full-mode
+# verification".
+#
+#   npm run infra:up     start + wait for health
+#   npm run test:full    run the suite with the gated specs enabled
+#   npm run infra:down   remove containers and volumes
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: nest-messaging-postgres
+    environment:
+      POSTGRES_USER: messaging
+      POSTGRES_PASSWORD: messaging
+      POSTGRES_DB: messaging
+    ports:
+      - '127.0.0.1:54322:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U messaging -d messaging']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    container_name: nest-messaging-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: messaging
+      MYSQL_DATABASE: messaging
+      MYSQL_USER: messaging
+      MYSQL_PASSWORD: messaging
+    ports:
+      - '127.0.0.1:33062:3306'
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-pmessaging']
+      interval: 2s
+      timeout: 3s
+      retries: 60

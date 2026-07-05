@@ -51,4 +51,28 @@ npm install @nest-native/kafka                                     # only for th
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
+## Quality Gates
+
+Every PR runs the full gate — build, typecheck, coverage with `c8` enforced at
+100% for statements, branches, functions, and lines, cognitive complexity
+enforcement (SonarJS threshold `15`), tarball validation, sample version sync,
+and a supply-chain audit:
+
+```bash
+npm run ci
+```
+
+Two **optional, local-only** layers sit on top (neither runs in CI, and forks
+work without them):
+
+- **Full mode** — `npm run infra:up && npm run test:full` runs the gated
+  MySQL/PostgreSQL round-trip specs against disposable Docker containers
+  (`compose.yaml`); `npm run infra:down` cleans up.
+- **Mutation testing** — `npm run test:mutation` (incremental Stryker run;
+  `test:mutation:full` re-tests everything). Scope with `STRYKER_MUTATE`,
+  include the gated I/O specs with `STRYKER_WITH_INFRA=1`.
+
+Details — including the pre-PR ritual and agent instructions — in
+[GUIDELINES_NEST_MESSAGING.md](GUIDELINES_NEST_MESSAGING.md#local-full-mode-verification-optional-infra--mutation-testing).
+
 See the [documentation](https://nest-native.dev/messaging/) for the full guide. Part of the [nest-native](https://github.com/nest-native) family. Not affiliated with the NestJS core team.

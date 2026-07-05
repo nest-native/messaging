@@ -8,6 +8,17 @@ package release is useful for users.
 
 ## Unreleased
 
+- Local full-mode verification and mutation testing (repo tooling; nothing
+  ships in the package): `compose.yaml` + `npm run infra:up`/`infra:down`
+  start disposable MySQL/PostgreSQL containers, the new `test:integration`
+  script wires up the previously unreachable gated round-trip specs,
+  `npm run test:full` runs them against those containers, and Stryker
+  mutation testing is available via `npm run test:mutation` (incremental) /
+  `test:mutation:full` with `STRYKER_MUTATE` scoping and
+  `STRYKER_WITH_INFRA=1` for I/O-inclusive runs. All of it is opt-in and
+  local-only — CI is unchanged and Docker-free. See the new "Local Full-Mode
+  Verification" section in GUIDELINES_NEST_MESSAGING.md.
+
 ## 0.3.1 - 2026-07-01
 
 ### Fixed
