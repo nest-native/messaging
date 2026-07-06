@@ -61,6 +61,7 @@ export class PostgresOutboxStore implements OutboxStore {
           ),
         )
         .limit(cfg.batchSize);
+      // Stryker disable next-line ConditionalExpression: query-saving early return — skipping it is behaviourally identical (inArray([]) matches nothing)
       if (candidates.length === 0) return [];
       const ids = candidates.map((c) => c.id);
       await tx

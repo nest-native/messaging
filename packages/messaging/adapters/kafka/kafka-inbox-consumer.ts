@@ -89,8 +89,8 @@ export class KafkaInboxConsumer {
 
   private readKey(context: KafkaContext): string | undefined {
     const key = context.getMessage().key;
-    if (key === null || key === undefined) return undefined;
-    return Buffer.isBuffer(key) ? key.toString('utf8') : key;
+    if (typeof key === 'string') return key;
+    return Buffer.isBuffer(key) ? key.toString('utf8') : undefined;
   }
 
   private async deadLetter(

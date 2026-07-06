@@ -6,7 +6,13 @@ import {
   actionForOutcome,
   deriveDedupKey as deriveDedupKeyStrict,
 } from '../adapters/kafka/idempotent-consumer';
-import { PermanentError, RetryableError } from '../transport';
+import { OUTBOX_TRANSPORT, PermanentError, RetryableError } from '../transport';
+import {
+  INBOX_STORE,
+  MESSAGING_DRIZZLE,
+  MESSAGING_OPTIONS,
+  OUTBOX_STORE,
+} from '../tokens';
 import { InMemoryOutboxTransport } from '../testing';
 import {
   decodeWireValue,
@@ -65,10 +71,30 @@ describe('wire contract', () => {
   });
 });
 
+describe('DI tokens', () => {
+  test('tokens are global Symbol.for registrations under the package namespace', () => {
+    // Symbol.for keys are the cross-module-instance identity of each token; a
+    // changed key silently splits providers between duplicated package copies.
+    assert.equal(Symbol.keyFor(OUTBOX_STORE), '@nest-native/messaging:outbox-store');
+    assert.equal(Symbol.keyFor(INBOX_STORE), '@nest-native/messaging:inbox-store');
+    assert.equal(Symbol.keyFor(MESSAGING_DRIZZLE), '@nest-native/messaging:drizzle');
+    assert.equal(Symbol.keyFor(MESSAGING_OPTIONS), '@nest-native/messaging:options');
+    assert.equal(
+      Symbol.keyFor(OUTBOX_TRANSPORT),
+      '@nest-native/messaging:outbox-transport',
+    );
+  });
+});
+
 describe('kafka pure helpers', () => {
   test('deriveDedupKey (strict) returns the key or throws PermanentError', () => {
     assert.equal(deriveDedupKeyStrict({ [X_EVENT_ID]: 'evt' }, undefined), 'evt');
-    assert.throws(() => deriveDedupKeyStrict({}, undefined), PermanentError);
+    // The message names the missing inputs — it is the operator's diagnostic.
+    assert.throws(
+      () => deriveDedupKeyStrict({}, undefined),
+      (e: unknown) =>
+        e instanceof PermanentError && /cannot deduplicate/.test(e.message),
+    );
   });
 
   test('actionForOutcome always acks; actionForError maps permanent vs transient', () => {

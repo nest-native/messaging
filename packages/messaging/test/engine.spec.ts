@@ -1,7 +1,8 @@
 import 'reflect-metadata';
 import { strict as assert } from 'node:assert';
+import { hostname } from 'node:os';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import { Injectable, Module } from '@nestjs/common';
+import { Injectable, Logger, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { DynamicModule, INestApplicationContext } from '@nestjs/common';
 import {
@@ -23,6 +24,7 @@ import {
   PermanentError,
   RetryableError,
 } from '../index';
+import { DEFAULT_CLAIMER_CONFIG } from '../outbox-claimer.service';
 import {
   inboxEvents,
   outboxEvents,
@@ -185,22 +187,90 @@ describe('OutboxClaimer (publish outcomes)', () => {
     assert.equal(after?.status, 'completed');
   });
 
-  test('a PermanentError fails the row immediately', async () => {
+  test('a PermanentError fails the row immediately (and warns with the reason)', async () => {
     await app.get(WidgetService).create('p');
     transport.failWith(new PermanentError('no handler'));
-    const report = await app.get(OutboxClaimer).tick();
-    assert.equal(report.failed, 1);
-    assert.equal(db.select().from(outboxEvents).all()[0]?.status, 'failed');
+    // Capture the claimer's Logger output for this tick: the failure warn must
+    // name the event and carry the reason.
+    const warns: unknown[] = [];
+    Logger.overrideLogger({
+      log: () => {},
+      error: () => {},
+      warn: (message: unknown) => warns.push(message),
+      debug: () => {},
+      verbose: () => {},
+    });
+    try {
+      const report = await app.get(OutboxClaimer).tick();
+      assert.equal(report.failed, 1);
+    } finally {
+      Logger.overrideLogger(false);
+    }
+    const failed = db.select().from(outboxEvents).all()[0];
+    assert.equal(failed?.status, 'failed');
+    assert.equal(warns.length, 1);
+    assert.match(String(warns[0]), new RegExp(`outbox event ${failed?.id} failed: no handler`));
   });
 
   test('a RetryableError reschedules (honouring delayMs)', async () => {
     await app.get(WidgetService).create('r');
     transport.failWith(new RetryableError('later', 5_000));
+    const before = Date.now();
     const report = await app.get(OutboxClaimer).tick();
     assert.equal(report.retried, 1);
     const row = db.select().from(outboxEvents).all()[0];
     assert.equal(row?.status, 'pending');
     assert.equal(row?.attempts, 1);
+    // The transport-supplied delay wins over the exponential backoff (which at
+    // attempts=0 would be at most baseBackoffMs * 2 = 2s < 5s).
+    assert.ok(new Date(row!.availableAt).getTime() >= before + 5_000);
+  });
+
+  test('generic-error backoff is jittered-exponential and capped', async () => {
+    const store = new SqliteOutboxStore();
+    // maxAttempts far above the sampled attempt counts so every tick retries.
+    const row = store.enqueue(db, { topic: 't', payload: {}, maxAttempts: 100 });
+    transport.failWith(new Error('flaky'));
+    const claimer = app.get(OutboxClaimer);
+
+    // Re-arm the row as due with a fixed attempts count, tick, and measure the
+    // scheduled delay (availableAt - now). attempts=2 → base 1000 * 2^2 = 4000.
+    const sample = async (attempts: number): Promise<number> => {
+      db.update(outboxEvents)
+        .set({
+          status: 'pending',
+          attempts,
+          availableAt: new Date(0).toISOString(),
+          claimedAt: null,
+          claimedBy: null,
+        })
+        .where(eq(outboxEvents.id, row.id))
+        .run();
+      const before = Date.now();
+      const report = await claimer.tick();
+      assert.equal(report.retried, 1);
+      const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
+      return new Date(after!.availableAt).getTime() - before;
+    };
+
+    const delays: number[] = [];
+    for (let i = 0; i < 12; i += 1) delays.push(await sample(2));
+    for (const d of delays) {
+      // Bounds: capped-base + jitter ∈ [4000, 5000) (small slop for the clock).
+      assert.ok(d >= 4_000 - 50, `delay below backoff base: ${d}`);
+      assert.ok(d < 5_000 + 250, `delay above base + jitter: ${d}`);
+    }
+    // Jitter is real: across 12 samples at least one lands well above the base
+    // (P(all uniform jitters < 300ms) ≈ 0.3^12 ≈ 5e-7).
+    assert.ok(
+      delays.some((d) => d >= 4_300),
+      `expected jitter above the base, got ${delays.join(',')}`,
+    );
+
+    // Deep attempt counts are capped at maxBackoffMs (60s) + jitter.
+    const capped = await sample(20);
+    assert.ok(capped >= 60_000 - 50, `cap not applied: ${capped}`);
+    assert.ok(capped < 61_000 + 250, `cap exceeded: ${capped}`);
   });
 
   test('a RetryableError without delay reschedules with backoff', async () => {
@@ -223,6 +293,15 @@ describe('OutboxClaimer (publish outcomes)', () => {
     const report = await app.get(OutboxClaimer).tick();
     assert.equal(report.failed, 1);
     assert.equal(db.select().from(outboxEvents).all()[0]?.status, 'failed');
+  });
+
+  test('DEFAULT_CLAIMER_CONFIG identifies the worker as host-pid', () => {
+    // The default claim owner ties a processing row to a live process — losing
+    // either half makes stuck-claim forensics impossible.
+    assert.equal(
+      DEFAULT_CLAIMER_CONFIG.workerInstanceId,
+      `${hostname()}-${process.pid}`,
+    );
   });
 
   test('a non-Error rejection is stringified into lastError', async () => {
@@ -320,6 +399,17 @@ describe('MessagingModule.forRootAsync / no inbox', () => {
     assert.equal(transport.list().length, 1);
     // ...and the inbox half is absent (no inboxStore provided).
     assert.throws(() => app.get(InboxService));
+  });
+
+  test('forRoot applies defaults when isGlobal/imports are omitted', () => {
+    const mod = MessagingModule.forRoot({
+      drizzleInstanceToken: DRIZZLE,
+      outboxStore: new SqliteOutboxStore(),
+      transport: new InMemoryOutboxTransport(),
+    });
+    assert.equal(mod.global, true);
+    assert.deepEqual(mod.imports, []);
+    assert.ok(mod.exports?.includes(OutboxClaimer));
   });
 
   test('forRootAsync applies defaults when isGlobal/imports/inject are omitted', () => {

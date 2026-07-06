@@ -100,6 +100,15 @@ describe('SqliteOutboxStore', () => {
     assert.deepEqual(await store.claimBatch(db, cfg), []);
   });
 
+  test('claimBatch does NOT reclaim a freshly claimed processing row', async () => {
+    store.enqueue(db, { topic: 't', payload: {} });
+    const first = await store.claimBatch(db, cfg);
+    assert.equal(first.length, 1);
+    // Claimed just now (claimedAt ≈ now) with stuckTimeoutMs=1000: the stuck
+    // cutoff is now - 1s, so the fresh claim must NOT be treated as stuck.
+    assert.deepEqual(await store.claimBatch(db, cfg), []);
+  });
+
   test('claimBatch reclaims a stuck processing row past the timeout', async () => {
     const row = store.enqueue(db, { topic: 't', payload: {} });
     const stale = new Date(Date.now() - 10_000).toISOString();
@@ -119,11 +128,14 @@ describe('SqliteOutboxStore', () => {
     assert.equal(after?.status, 'completed');
     assert.ok(after?.processedAt);
 
+    const before = Date.now();
     await store.retry(db, row.id, 5_000, 'boom');
     after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
     assert.equal(after?.status, 'pending');
     assert.equal(after?.attempts, 1);
     assert.equal(after?.lastError, 'boom');
+    // The retry delay pushes availableAt INTO THE FUTURE by delayMs.
+    assert.ok(new Date(after!.availableAt).getTime() >= before + 5_000);
 
     await store.retry(db, row.id, 1_000);
     after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
@@ -148,7 +160,14 @@ describe('SqliteInboxStore', () => {
     });
     assert.equal(outcome, 'processed');
     assert.equal(ran, 1);
-    assert.equal(db.select().from(inboxEvents).all().length, 1);
+    const rows = db.select().from(inboxEvents).all();
+    assert.equal(rows.length, 1);
+    // The dedup row records the full inbox shape.
+    assert.equal(rows[0]?.messageKey, 'k1');
+    assert.equal(rows[0]?.source, 'src');
+    assert.equal(rows[0]?.status, 'processed');
+    assert.ok(rows[0]?.processedAt);
+    assert.ok(rows[0]?.createdAt);
   });
 
   test('runOnce returns duplicate on a repeated key and skips the side effect', () => {
