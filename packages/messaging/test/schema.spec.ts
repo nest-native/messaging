@@ -31,10 +31,18 @@ function columnTable(cfg: { columns: unknown[] }): Record<string, ColumnSpec> {
   for (const raw of cfg.columns) {
     const c = raw as {
       name: string;
+      keyAsName: boolean;
       notNull: boolean;
       default?: unknown;
       length?: number;
     };
+    // Every column pins an EXPLICIT db name (drizzle's `keyAsName` is false).
+    // Dropping a column's name string makes drizzle fall back to the JS property
+    // key; for columns whose key already equals the snake_case name that leaves
+    // `name` unchanged, so this flag is the only signal that catches it — and it
+    // guards the real contract that the DDL column name must never silently
+    // track a JS-property rename.
+    assert.equal(c.keyAsName, false, `column ${c.name} must set an explicit db name`);
     const spec: ColumnSpec = { notNull: c.notNull };
     if (c.default !== undefined) spec.default = c.default;
     if (c.length !== undefined) spec.length = c.length;
