@@ -62,6 +62,7 @@ export class SqliteOutboxStore implements OutboxStore {
         )
         .limit(cfg.batchSize)
         .all();
+      // Stryker disable next-line ConditionalExpression: query-saving early return — skipping it is behaviourally identical (inArray([]) matches nothing)
       if (candidates.length === 0) return [];
       const ids = candidates.map((c) => c.id);
       tx.update(outboxEvents)

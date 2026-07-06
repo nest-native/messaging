@@ -37,7 +37,6 @@ export type WireHeaderValue =
  * Buffers (or arrays of them); the dedup key derivation needs a plain string.
  */
 export function headerToString(value: WireHeaderValue): string | undefined {
-  if (value === undefined) return undefined;
   if (Array.isArray(value)) return headerToString(value[0]);
   if (Buffer.isBuffer(value)) return value.toString('utf8');
   return value;

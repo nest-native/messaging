@@ -8,6 +8,11 @@ package release is useful for users.
 
 ## Unreleased
 
+- Internal simplifications surfaced by the full-package mutation pass (no
+  behavior change): `headerToString` drops a redundant `undefined` guard
+  (the fall-through already returns `undefined`), and the Kafka inbox
+  consumer's `readKey` collapses its `null`/`undefined` checks into a single
+  `typeof`/`Buffer.isBuffer` dispatch.
 - Local full-mode verification and mutation testing (repo tooling; nothing
   ships in the package): `compose.yaml` + `npm run infra:up`/`infra:down`
   start disposable MySQL/PostgreSQL containers, the new `test:integration`

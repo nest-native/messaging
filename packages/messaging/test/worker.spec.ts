@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { strict as assert } from 'node:assert';
+import { getEventListeners } from 'node:events';
 import { describe, test } from 'node:test';
 import type { OutboxClaimer, TickReport } from '../outbox-claimer.service';
 import { runWorkerLoop } from '../outbox-worker';
@@ -89,6 +90,7 @@ describe('runWorkerLoop', () => {
 
   test('uses the default poll interval and is abortable mid-sleep', async () => {
     const controller = new AbortController();
+    const start = Date.now();
     await runWorkerLoop(
       fakeClaimer(async () => {
         // Abort after this tick so the default 2s sleep is cut short by the
@@ -99,5 +101,129 @@ describe('runWorkerLoop', () => {
       { signal: controller.signal },
     );
     assert.ok(controller.signal.aborted);
+    // The abort must short-circuit the default 2s sleep — if the aborted-signal
+    // fast path were gone the loop would wait the full interval.
+    assert.ok(Date.now() - start < 1_500);
+  });
+
+  test('loops immediately (no idle sleep) while ticks are claiming', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const start = Date.now();
+    await runWorkerLoop(
+      fakeClaimer(async () => {
+        calls += 1;
+        if (calls === 3) controller.abort();
+        return report(1);
+      }),
+      // A poll interval far above the runtime bound: any sleep after a claiming
+      // tick (inverted/hardcoded `claimed === 0` guard) blows the assertion.
+      { pollIntervalMs: 8_000, signal: controller.signal },
+    );
+    assert.equal(calls, 3);
+    assert.ok(Date.now() - start < 4_000);
+  });
+
+  test('waits pollIntervalMs (and not the 2s default) between idle ticks', async () => {
+    const controller = new AbortController();
+    const timestamps: number[] = [];
+    await runWorkerLoop(
+      fakeClaimer(async () => {
+        timestamps.push(Date.now());
+        if (timestamps.length === 2) controller.abort();
+        return report(0);
+      }),
+      { pollIntervalMs: 100, signal: controller.signal },
+    );
+    const gap = timestamps[1]! - timestamps[0]!;
+    // Lower bound: the idle path really sleeps (a skipped sleep gives ~0ms).
+    assert.ok(gap >= 80, `expected an idle wait, got ${gap}ms`);
+    // Upper bound: the override is honoured (falling back to the 2s default —
+    // e.g. a mutated `??` — would gap well beyond this).
+    assert.ok(gap < 1_500, `idle wait too long: ${gap}ms`);
+  });
+
+  test('an abort during the idle sleep wakes it and removes the listener', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const start = Date.now();
+    await runWorkerLoop(
+      fakeClaimer(async () => {
+        calls += 1;
+        // Fire mid-sleep so the abort listener (not the timer) ends the wait.
+        setTimeout(() => controller.abort(), 25);
+        return report(0);
+      }),
+      { pollIntervalMs: 8_000, signal: controller.signal },
+    );
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - start < 4_000);
+    // { once: true } — the fired listener must not linger on the signal.
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  });
+
+  test('a throwing tick without onError still continues (onError is optional)', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    await runWorkerLoop(
+      fakeClaimer(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('boom');
+        controller.abort();
+        return report(0);
+      }),
+      { pollIntervalMs: 5, signal: controller.signal },
+    );
+    assert.equal(calls, 2);
+  });
+
+  test('a claiming tick without onTick reports no error (onTick is optional)', async () => {
+    const controller = new AbortController();
+    const errors: unknown[] = [];
+    let calls = 0;
+    await runWorkerLoop(
+      fakeClaimer(async () => {
+        calls += 1;
+        if (calls === 2) controller.abort();
+        return report(calls === 1 ? 1 : 0);
+      }),
+      { pollIntervalMs: 5, signal: controller.signal, onError: (e) => errors.push(e) },
+    );
+    assert.deepEqual(errors, []);
+    assert.equal(calls, 2);
+  });
+
+  test('runs without a signal: the loop keeps going (and never settles)', async () => {
+    let calls = 0;
+    let settled = false;
+    // No signal: the loop must treat the missing signal as "never aborted".
+    // The second tick parks forever so the test can observe a still-running
+    // loop without leaving live timers behind.
+    const loop = runWorkerLoop(
+      fakeClaimer(() => {
+        calls += 1;
+        if (calls >= 2) return new Promise<TickReport>(() => {});
+        return Promise.resolve(report(0));
+      }),
+      { pollIntervalMs: 1 },
+    );
+    loop.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Wait (bounded) for the second tick — the loop must get there on its own.
+    const deadline = Date.now() + 5_000;
+    while (calls < 2 && !settled && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // tick → idle sleep (signal-less) → tick again: both the loop guard and the
+    // sleep must tolerate `signal === undefined` (a non-optional access throws
+    // and settles the loop before the second tick).
+    assert.equal(calls, 2);
+    assert.equal(settled, false);
   });
 });

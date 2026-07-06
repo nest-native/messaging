@@ -1,6 +1,8 @@
 import 'reflect-metadata';
 import { strict as assert } from 'node:assert';
 import { describe, test } from 'node:test';
+import { MySqlDialect } from 'drizzle-orm/mysql-core';
+import type { SQL } from 'drizzle-orm';
 import { DEFAULT_CLAIMER_CONFIG } from '../outbox-claimer.service';
 import {
   isMysqlUniqueViolation,
@@ -18,6 +20,12 @@ import type { OutboxEventRow } from '../interfaces';
 // gated real-MySQL integration test in `test/integration/`.
 
 const cfg = { ...DEFAULT_CLAIMER_CONFIG, batchSize: 10, stuckTimeoutMs: 1_000 };
+
+// Render a captured drizzle condition / SQL fragment to `{ sql, params }` so
+// the store's *query semantics* (not just its captured `.set` values) are
+// asserted — this is what a real MySQL server would receive.
+const render = (fragment: unknown) =>
+  new MySqlDialect().sqlToQuery(fragment as SQL);
 
 function row(overrides: Partial<OutboxEventRow> = {}): OutboxEventRow {
   return {
@@ -43,17 +51,29 @@ interface OutboxMockOptions {
   candidates?: { id: string }[];
 }
 
+interface CapturedQueries {
+  insert?: Record<string, unknown>;
+  set?: Record<string, unknown>;
+  projection?: Record<string, unknown>;
+  candidatesWhere?: unknown;
+  updateWhere?: unknown;
+}
+
 function outboxMock(options: OutboxMockOptions = {}) {
-  const captured: { insert?: Record<string, unknown>; set?: Record<string, unknown> } = {};
+  const captured: CapturedQueries = {};
   const selectRows = options.selectRows ?? [];
   // A projected `select({ id })` is the claimer's candidate query (terminated by
   // `.limit()`); a bare `select()` is the enqueue read-back / claim re-read.
-  const buildSelect = (projection?: unknown) => ({
+  const buildSelect = (projection?: Record<string, unknown>) => ({
     from: () => ({
-      where: () =>
-        projection
-          ? { limit: () => Promise.resolve(options.candidates ?? []) }
-          : Promise.resolve(selectRows),
+      where: (condition: unknown) => {
+        if (projection) {
+          captured.projection = projection;
+          captured.candidatesWhere = condition;
+          return { limit: () => Promise.resolve(options.candidates ?? []) };
+        }
+        return Promise.resolve(selectRows);
+      },
     }),
   });
   const db: unknown = {
@@ -63,11 +83,16 @@ function outboxMock(options: OutboxMockOptions = {}) {
         return Promise.resolve([{}]);
       },
     }),
-    select: (projection?: unknown) => buildSelect(projection),
+    select: (projection?: Record<string, unknown>) => buildSelect(projection),
     update: () => ({
       set: (values: Record<string, unknown>) => {
         captured.set = values;
-        return { where: () => Promise.resolve([{}]) };
+        return {
+          where: (condition: unknown) => {
+            captured.updateWhere = condition;
+            return Promise.resolve([{}]);
+          },
+        };
       },
     }),
     transaction: (run: (tx: unknown) => unknown) => run(db),
@@ -114,12 +139,35 @@ describe('MysqlOutboxStore', () => {
     const claimed = row({ id: 'a', status: 'processing' });
     const { db, captured } = outboxMock({ candidates: [{ id: 'a' }], selectRows: [claimed] });
 
+    const before = Date.now();
     const result = await store.claimBatch(db, cfg);
 
     assert.deepEqual(result, [claimed]);
     assert.equal(captured.set?.status, 'processing');
     assert.equal(captured.set?.claimedBy, cfg.workerInstanceId);
     assert.ok(typeof captured.set?.claimedAt === 'string');
+
+    // Candidate query: due-pending OR stuck-processing, with the stuck cutoff
+    // strictly in the past (claimedAt <= now - stuckTimeoutMs).
+    assert.ok(captured.projection && 'id' in captured.projection);
+    const where = render(captured.candidatesWhere);
+    assert.match(
+      where.sql,
+      /\(`outbox_events`\.`status` = \? and `outbox_events`\.`available_at` <= \?\) or \(`outbox_events`\.`status` = \? and `outbox_events`\.`claimed_at` <= \?\)/,
+    );
+    const [pending, nowIso, processing, cutoff] = where.params as string[];
+    assert.equal(pending, 'pending');
+    assert.equal(processing, 'processing');
+    assert.ok(new Date(nowIso!).getTime() >= before - 1_000);
+    assert.ok(
+      new Date(cutoff!).getTime() <= Date.now() - cfg.stuckTimeoutMs,
+      `stuck cutoff must be in the past: ${cutoff}`,
+    );
+
+    // The claim UPDATE targets exactly the candidate ids.
+    const updateWhere = render(captured.updateWhere);
+    assert.match(updateWhere.sql, /`outbox_events`\.`id` in \(\?\)/);
+    assert.deepEqual(updateWhere.params, ['a']);
   });
 
   test('claimBatch returns [] with no update when nothing is due', async () => {
@@ -139,11 +187,17 @@ describe('MysqlOutboxStore', () => {
 
   test('retry re-arms the row, carrying or clearing lastError', async () => {
     const withError = outboxMock();
+    const before = Date.now();
     await store.retry(withError.db, 'id-1', 5_000, 'boom');
     assert.equal(withError.captured.set?.status, 'pending');
     assert.equal(withError.captured.set?.lastError, 'boom');
     assert.equal(withError.captured.set?.claimedAt, null);
     assert.equal(withError.captured.set?.claimedBy, null);
+    // The next attempt is delayed into the future by delayMs...
+    const nextAvailable = new Date(String(withError.captured.set?.availableAt)).getTime();
+    assert.ok(nextAvailable >= before + 5_000);
+    // ...and attempts increments IN SQL (`attempts + 1`), not via a read-modify-write.
+    assert.match(render(withError.captured.set?.attempts).sql, /`attempts` \+ 1/);
 
     const noError = outboxMock();
     await store.retry(noError.db, 'id-1', 1_000);
@@ -156,12 +210,21 @@ describe('MysqlOutboxStore', () => {
     assert.equal(captured.set?.status, 'failed');
     assert.equal(captured.set?.lastError, 'dead');
     assert.ok(typeof captured.set?.processedAt === 'string');
+    assert.match(render(captured.set?.attempts).sql, /`attempts` \+ 1/);
   });
 });
 
 describe('MysqlInboxStore', () => {
   const store = new MysqlInboxStore();
-  const okDb = { insert: () => ({ values: () => Promise.resolve([{}]) }) };
+  const captured: { insert?: Record<string, unknown> } = {};
+  const okDb = {
+    insert: () => ({
+      values: (values: Record<string, unknown>) => {
+        captured.insert = values;
+        return Promise.resolve([{}]);
+      },
+    }),
+  };
 
   test('runOnce processes a fresh key (async side effect)', async () => {
     let ran = 0;
@@ -170,6 +233,13 @@ describe('MysqlInboxStore', () => {
     });
     assert.equal(outcome, 'processed');
     assert.equal(ran, 1);
+    // The dedup row carries the full inbox shape.
+    assert.equal(captured.insert?.messageKey, 'k1');
+    assert.equal(captured.insert?.source, 'src');
+    assert.equal(captured.insert?.status, 'processed');
+    assert.ok(typeof captured.insert?.id === 'string' && captured.insert.id.length > 0);
+    assert.ok(typeof captured.insert?.processedAt === 'string');
+    assert.ok(typeof captured.insert?.createdAt === 'string');
   });
 
   test('runOnce returns duplicate on errno 1062, skips the side effect', async () => {

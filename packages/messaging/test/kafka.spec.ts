@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { strict as assert } from 'node:assert';
-import { beforeEach, describe, test } from 'node:test';
+import { after, before, beforeEach, describe, test } from 'node:test';
+import { Logger } from '@nestjs/common';
 import type { KafkaProducerService } from '@nest-native/kafka';
 import {
   KafkaInboxConsumer,
@@ -60,6 +61,22 @@ describe('KafkaOutboxTransport', () => {
 });
 
 describe('KafkaInboxConsumer', () => {
+  // Capture the consumer's Nest Logger output (debug for duplicates, warn for
+  // dead-letters) so the log *content* is asserted, not just the outcome.
+  const logs: { level: string; message: unknown }[] = [];
+  before(() => {
+    Logger.overrideLogger({
+      log: (message: unknown) => logs.push({ level: 'log', message }),
+      error: (message: unknown) => logs.push({ level: 'error', message }),
+      warn: (message: unknown) => logs.push({ level: 'warn', message }),
+      debug: (message: unknown) => logs.push({ level: 'debug', message }),
+      verbose: (message: unknown) => logs.push({ level: 'verbose', message }),
+    });
+  });
+  after(() => {
+    Logger.overrideLogger(false);
+  });
+
   // Build a fake KafkaContext exposing the raw message (key/value/headers).
   function context(key: string | null, value: string | null) {
     return {
@@ -81,7 +98,13 @@ describe('KafkaInboxConsumer', () => {
   let producer: KafkaProducerService;
   beforeEach(() => {
     ({ producer, sent } = mockProducer());
+    logs.length = 0;
   });
+
+  const duplicateDebugLogs = () =>
+    logs.filter(
+      (l) => l.level === 'debug' && /duplicate skipped/.test(String(l.message)),
+    );
 
   test('acks a freshly processed message and runs the side effect', async () => {
     let ran = 0;
@@ -106,6 +129,8 @@ describe('KafkaInboxConsumer', () => {
     assert.deepEqual(result, { outcome: 'processed', dedupKey: 'evt-1' });
     assert.equal(ran, 1);
     assert.equal(sent.length, 0);
+    // The duplicate-skipped debug line is duplicate-only — never on a fresh message.
+    assert.deepEqual(duplicateDebugLogs(), []);
   });
 
   test('acks (logs) a duplicate without re-running the side effect', async () => {
@@ -123,6 +148,10 @@ describe('KafkaInboxConsumer', () => {
       dlqTopic: 't.DLQ',
     });
     assert.equal(result.outcome, 'duplicate');
+    // The skip is logged at debug level with the dedup key for traceability.
+    const skips = duplicateDebugLogs();
+    assert.equal(skips.length, 1);
+    assert.match(String(skips[0]?.message), /duplicate skipped: evt-1/);
   });
 
   test('dead-letters an invalid payload (with x-error) and acks', async () => {
@@ -144,6 +173,10 @@ describe('KafkaInboxConsumer', () => {
     assert.equal(sent[0]?.messages[0]?.key, 'k');
     assert.equal(sent[0]?.messages[0]?.value, 'raw-bytes');
     assert.match(String(sent[0]?.messages[0]?.headers?.[X_ERROR]), /validation/);
+    // The dead-letter warn names the DLQ topic and the reason.
+    const warns = logs.filter((l) => l.level === 'warn');
+    assert.equal(warns.length, 1);
+    assert.match(String(warns[0]?.message), /dead-lettered to t\.DLQ: .*validation/);
   });
 
   test('dead-letters a keyless message (null key → DLQ with null key)', async () => {
@@ -185,6 +218,28 @@ describe('KafkaInboxConsumer', () => {
       RetryableError,
     );
     assert.equal(sent.length, 0);
+  });
+
+  test('reads a string message key (dedup falls back to it without headers)', async () => {
+    let seenKey: string | undefined;
+    const consumer = new KafkaInboxConsumer(
+      inbox(async (k) => {
+        seenKey = k;
+        return 'processed';
+      }),
+      producer,
+    );
+    const result = await consumer.consume<Payload>({
+      source: 's',
+      context: context('strkey', '{}'),
+      headers: {},
+      payload: { ok: true },
+      validate,
+      sideEffect: () => {},
+      dlqTopic: 't.DLQ',
+    });
+    assert.deepEqual(result, { outcome: 'processed', dedupKey: 'strkey' });
+    assert.equal(seenKey, 'strkey');
   });
 
   test('reads a Buffer message key', async () => {

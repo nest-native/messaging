@@ -90,11 +90,14 @@ describe('PostgresOutboxStore', () => {
     await store.markCompleted(db, row.id);
     assert.equal((await fetch(row.id))?.status, 'completed');
 
+    const before = Date.now();
     await store.retry(db, row.id, 5_000, 'boom');
     let after = await fetch(row.id);
     assert.equal(after?.status, 'pending');
     assert.equal(after?.attempts, 1);
     assert.equal(after?.lastError, 'boom');
+    // The retry delay pushes availableAt INTO THE FUTURE by delayMs.
+    assert.ok(new Date(after!.availableAt).getTime() >= before + 5_000);
 
     await store.retry(db, row.id, 1_000);
     after = await fetch(row.id);
@@ -123,7 +126,14 @@ describe('PostgresInboxStore', () => {
     });
     assert.equal(outcome, 'processed');
     assert.equal(ran, 1);
-    assert.equal((await db.select().from(inboxEvents)).length, 1);
+    const rows = await db.select().from(inboxEvents);
+    assert.equal(rows.length, 1);
+    // The dedup row records the full inbox shape.
+    assert.equal(rows[0]?.messageKey, 'k1');
+    assert.equal(rows[0]?.source, 'src');
+    assert.equal(rows[0]?.status, 'processed');
+    assert.ok(rows[0]?.processedAt);
+    assert.ok(rows[0]?.createdAt);
   });
 
   test('runOnce returns duplicate on a repeated key, skips side effect', async () => {
