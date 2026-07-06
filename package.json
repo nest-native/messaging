@@ -46,7 +46,7 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.3",
+    "@electric-sql/pglite": "^0.5.4",
     "@nest-native/kafka": "^0.3.0",
     "@nestjs-cls/transactional": "^3.2.1",
     "@nestjs-cls/transactional-adapter-drizzle-orm": "^1.3.0",
