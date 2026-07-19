@@ -80,12 +80,45 @@ interface WorkerLoopOptions {
   signal?: AbortSignal;             // abort to stop the loop
   onTick?: (report: TickReport) => void;
   onError?: (error: unknown) => void;
+  waker?: OutboxWaker;              // optional event-driven wake (see below)
 }
 ```
 
 Loops `claimer.tick()`: when a tick claims a batch it loops immediately to drain
 the backlog; when it claims nothing it waits `pollIntervalMs`. A throwing tick is
 reported via `onError` and the loop continues.
+
+### Wake tiers (cutting the idle latency)
+
+The idle `pollIntervalMs` wait is the worst-case latency for a lone event
+landing in an idle outbox. Three opt-in tiers cut it — polling always remains
+the delivery backstop, so a missed wake only costs one poll interval:
+
+```ts
+// same process: notify() after the enqueueing transaction commits
+const waker = new OutboxWaker();
+runWorkerLoop(claimer, { waker, signal });
+waker.notify();
+
+// separate processes, same machine: a unix-domain-socket bridge
+const server = new WakeSocketServer({ path, waker });  // worker side
+await server.listen();
+new WakeSocketClient({ path }).notify();               // producer side
+
+// separate machines (Postgres only): LISTEN/NOTIFY through the database
+new PostgresOutboxStore({ wakeChannel: 'outbox_wake' }) // pg_notify rides the tx
+const listener = new PostgresWakeListener({             // worker side
+  connect: () => new pg.Client({ connectionString, keepAlive: true }),   // dedicated, non-pooled
+  channel: 'outbox_wake',
+  waker,
+});
+listener.start(); // reconnects on drops; await listener.stop() on shutdown
+```
+
+Producers can depend on the shared `WakeSignal` shape (`{ notify(): void }`), so
+switching deployment topology never touches domain code. With `wakeChannel`,
+Postgres delivers the notify **on commit** and drops it on rollback — the wake
+is atomic with the event becoming visible.
 
 ### `InboxService`
 
