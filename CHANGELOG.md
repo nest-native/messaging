@@ -6,7 +6,7 @@ This project follows semantic versioning for the published package. Sample,
 documentation, and CI-only changes may remain in `Unreleased` until the next
 package release is useful for users.
 
-## Unreleased
+## 0.4.0 - 2026-07-19
 
 - **Added `OutboxWaker` — an in-process wake for the worker loop.** The worker
   only waits `pollIntervalMs` when a tick claims nothing, so that interval is the
