@@ -8,5 +8,6 @@ export * from './tokens';
 export * from './outbox-producer.service';
 export * from './outbox-claimer.service';
 export * from './inbox.service';
+export * from './outbox-waker';
 export * from './outbox-worker';
 export * from './messaging.module';
