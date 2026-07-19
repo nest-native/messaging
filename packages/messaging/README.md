@@ -111,15 +111,38 @@ switching topology — single process (`OutboxWaker`) ↔ app + worker processes
 this covers every supported deployment: processes sharing a SQLite file are by
 definition on one machine.
 
-**Across machines** the wake would have to travel through shared infrastructure
-(e.g. Postgres `LISTEN`/`NOTIFY`) — a planned, dialect-specific follow-up. Those
-workers rely on polling today.
+**Across machines** the wake travels through the one thing every worker already
+shares — the database. On the **Postgres** dialect, `LISTEN`/`NOTIFY` carries it:
+
+```ts
+// producer side — one option on the store; pg_notify rides the enqueue
+// transaction, so Postgres delivers the wake ON COMMIT and drops it on
+// rollback (the signal is atomic with the event becoming visible)
+new PostgresOutboxStore({ wakeChannel: 'outbox_wake' })
+
+// worker side — a DEDICATED (non-pooled) LISTEN connection feeds the waker
+import { PostgresWakeListener } from '@nest-native/messaging/postgres';
+
+const listener = new PostgresWakeListener({
+  connect: () => new pg.Client({ connectionString, keepAlive: true }), // fresh client per attempt
+  channel: 'outbox_wake',
+  waker, // the same OutboxWaker passed to runWorkerLoop
+});
+listener.start();
+// on shutdown: await listener.stop();
+```
+
+The listener reconnects (default every 5s) when its connection drops;
+notifications missed during the gap are not recovered — polling remains the
+backstop, exactly as with the other tiers. `LISTEN`/`NOTIFY` is Postgres-only:
+SQLite and MySQL deployments use the socket tier above (for SQLite that is the
+whole story anyway — its processes share one machine by definition).
 
 ## Status & scope
 
 - **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
-- **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; an `OutboxWaker` cuts that idle wait in-process, and the `WakeSocket` pair carries the wake across processes on the same machine (see above).
-- **Roadmap:** a cross-machine wake (Postgres `LISTEN`/`NOTIFY`); additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
+- **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; the wake tiers cut that idle wait — `OutboxWaker` in-process, the `WakeSocket` pair across processes on one machine, and Postgres `LISTEN`/`NOTIFY` across machines (see above).
+- **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
 Part of the [nest-native](https://github.com/nest-native) family. Not affiliated with the NestJS core team. MIT licensed.

@@ -6,6 +6,33 @@ This project follows semantic versioning for the published package. Sample,
 documentation, and CI-only changes may remain in `Unreleased` until the next
 package release is useful for users.
 
+## Unreleased
+
+- **Added the cross-machine wake for the Postgres dialect — `LISTEN`/`NOTIFY`.**
+  Completes the wake tiers from 0.4.0: `new PostgresOutboxStore({ wakeChannel })`
+  piggybacks `pg_notify` on the enqueue transaction (Postgres delivers it **on
+  commit** and drops it on rollback, so the wake is atomic with the event
+  becoming visible — no post-commit discipline needed), and the new
+  `PostgresWakeListener` (at `@nest-native/messaging/postgres`) holds a
+  dedicated `LISTEN` connection that feeds the worker's `OutboxWaker`,
+  reconnecting with a fixed delay when the connection drops. Best-effort by the
+  same contract as the other tiers: notifications missed during a reconnect gap
+  are not recovered — polling remains the delivery backstop, so a lost wake only
+  costs one poll interval, never an event. Channels are allow-listed to an
+  identifier-safe charset (`LISTEN` cannot be parameterized), capped at
+  Postgres's 63-byte identifier limit (beyond it `LISTEN` silently truncates
+  while `pg_notify` RAISES — which would abort the caller's business
+  transaction), and double-quoted, keeping `LISTEN` case-sensitivity aligned
+  with `pg_notify`'s exact-string channel. The listener survives the pg
+  end-during-connect edge (a client ended mid-connect never settles its
+  `connect()` promise — the session races it against the connection's own
+  `end`/`error` events so `stop()` cannot hang), guards a throwing custom
+  `WakeSignal` from crashing the worker, validates `reconnectDelayMs`, and the
+  documented factory sets `keepAlive: true` so a half-open LISTEN socket is
+  detected by the OS. Postgres-only by nature; SQLite/MySQL use the
+  `WakeSocket` tier. Verified against real Postgres: delivered on commit,
+  dropped on rollback.
+
 ## 0.4.0 - 2026-07-19
 
 - **Added `OutboxWaker` — an in-process wake for the worker loop.** The worker

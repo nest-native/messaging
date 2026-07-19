@@ -8,8 +8,19 @@ import type {
   ResolvedClaimerConfig,
 } from '../../interfaces';
 import { outboxEvents } from './schema';
+import { assertValidWakeChannel } from './wake';
 
 type Db = NodePgDatabase<Record<string, never>>;
+
+export interface PostgresOutboxStoreOptions {
+  /**
+   * When set, `enqueue` also runs `pg_notify(wakeChannel, '')` on the same
+   * handle — inside the caller's transaction, so Postgres delivers the wake
+   * **on commit** and drops it on rollback: the signal is atomic with the event
+   * becoming visible. Pair it with a `PostgresWakeListener` on the workers.
+   */
+  wakeChannel?: string;
+}
 
 /**
  * Postgres (node-postgres) outbox store. Every method is **asynchronous** —
@@ -18,6 +29,12 @@ type Db = NodePgDatabase<Record<string, never>>;
  * transaction.
  */
 export class PostgresOutboxStore implements OutboxStore {
+  constructor(private readonly options: PostgresOutboxStoreOptions = {}) {
+    if (this.options.wakeChannel !== undefined) {
+      assertValidWakeChannel(this.options.wakeChannel);
+    }
+  }
+
   async enqueue(db: unknown, input: EnqueueInput<object>): Promise<OutboxEventRow> {
     const now = new Date().toISOString();
     const [row] = await (db as Db)
@@ -34,6 +51,13 @@ export class PostgresOutboxStore implements OutboxStore {
         createdAt: now,
       })
       .returning();
+    if (this.options.wakeChannel !== undefined) {
+      // pg_notify takes the channel as a plain string parameter (safely
+      // parameterized, unlike LISTEN's identifier) — delivered on commit.
+      await (db as Db).execute(
+        sql`select pg_notify(${this.options.wakeChannel}, '')`,
+      );
+    }
     return row;
   }
 

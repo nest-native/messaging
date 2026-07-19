@@ -167,6 +167,41 @@ describe('PostgresInboxStore', () => {
   });
 });
 
+describe('PostgresOutboxStore wakeChannel', () => {
+  test('enqueue fires pg_notify on the configured channel (observed via LISTEN)', async () => {
+    // A dedicated PGlite so we can reach its listen() API directly — the shared
+    // beforeEach db hides the raw client behind drizzle.
+    const raw = new PGlite();
+    const wakeDb = drizzle(raw);
+    for (const stmt of DDL.split(';')) {
+      const trimmed = stmt.trim();
+      if (trimmed) await wakeDb.execute(trimmed);
+    }
+    let wakes = 0;
+    await raw.listen('outbox_wake_test', () => {
+      wakes += 1;
+    });
+
+    const store = new PostgresOutboxStore({ wakeChannel: 'outbox_wake_test' });
+    const row = await store.enqueue(wakeDb, { topic: 't', payload: { a: 1 } });
+    assert.equal(row.status, 'pending'); // the insert itself is unchanged
+
+    const deadline = Date.now() + 5_000;
+    while (wakes === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(wakes, 1, 'pg_notify must reach the listener');
+    await raw.close();
+  });
+
+  test('rejects an unsafe wakeChannel at construction', () => {
+    assert.throws(
+      () => new PostgresOutboxStore({ wakeChannel: 'x"; DROP TABLE y' }),
+      /invalid wake channel/,
+    );
+  });
+});
+
 describe('isPgUniqueViolation', () => {
   test('matches 23505 (direct or wrapped in cause), rejects others', () => {
     assert.equal(isPgUniqueViolation({ code: '23505' }), true);

@@ -14,6 +14,7 @@ import {
   outboxEvents as pgOutboxEvents,
   PostgresInboxStore,
   PostgresOutboxStore,
+  PostgresWakeListener,
 } from '../../dialects/postgres';
 
 // Gated end-to-end tests against a REAL database. They skip unless the matching
@@ -199,5 +200,47 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
     const seen = await pool.query('SELECT count(*)::int AS c FROM integration_side_effects WHERE dedup_key = $1', [key]);
     assert.equal((seen.rows as { c: number }[])[0].c, 1);
     void pgInboxEvents;
+  });
+
+  test('LISTEN/NOTIFY wake: delivered on commit, dropped on rollback', async () => {
+    const pg = await import('pg');
+    let wakes = 0;
+    const listener = new PostgresWakeListener({
+      // A dedicated client, NOT the pool: notifications arrive only on the
+      // exact connection that issued LISTEN.
+      connect: () => new pg.Client({ connectionString: POSTGRES_URL, keepAlive: true }),
+      channel: 'outbox_wake_it',
+      waker: { notify: () => (wakes += 1) },
+    });
+    listener.start();
+    try {
+      const wakeStore = new PostgresOutboxStore({ wakeChannel: 'outbox_wake_it' });
+
+      // Give the listener a beat to establish LISTEN before the first NOTIFY.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // Committed enqueue → exactly one wake arrives.
+      await db.transaction(async (tx) => {
+        await wakeStore.enqueue(tx, { topic: 'wake.commit', payload: { n: 1 } });
+      });
+      const deadline = Date.now() + 5_000;
+      while (wakes === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(wakes, 1, 'a committed enqueue must wake the listener');
+
+      // Rolled-back enqueue → Postgres drops the notification with the tx.
+      await assert.rejects(
+        db.transaction(async (tx) => {
+          await wakeStore.enqueue(tx, { topic: 'wake.rollback', payload: { n: 2 } });
+          throw new Error('force rollback');
+        }),
+        /force rollback/,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      assert.equal(wakes, 1, 'a rolled-back enqueue must NOT wake the listener');
+    } finally {
+      await listener.stop();
+    }
   });
 });
