@@ -6,7 +6,7 @@ This project follows semantic versioning for the published package. Sample,
 documentation, and CI-only changes may remain in `Unreleased` until the next
 package release is useful for users.
 
-## Unreleased
+## 0.5.0 - 2026-07-19
 
 - **Added the cross-machine wake for the Postgres dialect — `LISTEN`/`NOTIFY`.**
   Completes the wake tiers from 0.4.0: `new PostgresOutboxStore({ wakeChannel })`
