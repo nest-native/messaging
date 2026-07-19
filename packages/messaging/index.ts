@@ -10,4 +10,5 @@ export * from './outbox-claimer.service';
 export * from './inbox.service';
 export * from './outbox-waker';
 export * from './outbox-worker';
+export * from './wake-socket';
 export * from './messaging.module';

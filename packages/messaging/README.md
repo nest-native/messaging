@@ -87,17 +87,39 @@ await this.txHost.withTransaction(async () => {
 waker.notify();
 ```
 
-**Same process only.** `notify()` can't cross process boundaries — a worker in a
-*separate* process from the producer still relies on polling. A cross-process wake
-(e.g. Postgres `LISTEN`/`NOTIFY`) is a planned, dialect-specific follow-up;
-`OutboxWaker` is the dialect-agnostic half that works today and gives that bridge
-something to drive.
+**Across processes on the same machine** — the classic split where the HTTP app
+and the worker (`npm run start:worker`) are separate processes sharing one
+database — an in-memory `notify()` can't cross the boundary. The
+`WakeSocketServer`/`WakeSocketClient` pair bridges it over a unix domain socket
+(a `\\.\pipe\…` name on Windows), built on `node:net` alone:
+
+```ts
+// worker process — feed incoming wakes into the loop's waker
+const waker = new OutboxWaker();
+const wakeServer = new WakeSocketServer({ path: env.outboxWakeSocket, waker });
+await wakeServer.listen(); // recovers a stale path left by a crashed worker
+runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal });
+
+// app process — same path, fire-and-forget after the commit
+const wake = new WakeSocketClient({ path: env.outboxWakeSocket });
+wake.notify(); // never throws; a failed wake only costs one poll interval
+```
+
+Producers can depend on the shared `WakeSignal` shape (`{ notify(): void }`) so
+switching topology — single process (`OutboxWaker`) ↔ app + worker processes
+(`WakeSocketClient`) — never touches domain code. Note that for the SQLite store
+this covers every supported deployment: processes sharing a SQLite file are by
+definition on one machine.
+
+**Across machines** the wake would have to travel through shared infrastructure
+(e.g. Postgres `LISTEN`/`NOTIFY`) — a planned, dialect-specific follow-up. Those
+workers rely on polling today.
 
 ## Status & scope
 
 - **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
-- **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; an `OutboxWaker` cuts that idle wait for same-process workers (see above).
-- **Roadmap:** a cross-process wake (Postgres `LISTEN`/`NOTIFY`) to extend `OutboxWaker` past process boundaries; additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
+- **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; an `OutboxWaker` cuts that idle wait in-process, and the `WakeSocket` pair carries the wake across processes on the same machine (see above).
+- **Roadmap:** a cross-machine wake (Postgres `LISTEN`/`NOTIFY`); additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
 Part of the [nest-native](https://github.com/nest-native) family. Not affiliated with the NestJS core team. MIT licensed.

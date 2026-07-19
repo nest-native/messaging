@@ -1,4 +1,14 @@
 /**
+ * Anything a producer can nudge after committing an event: the in-process
+ * {@link OutboxWaker}, or a {@link WakeSocketClient} when the worker runs in a
+ * separate process. Producers depend on this shape so swapping deployment
+ * topology (single process ↔ app + worker processes) doesn't touch domain code.
+ */
+export interface WakeSignal {
+  notify(): void;
+}
+
+/**
  * An in-process wake signal for {@link runWorkerLoop}.
  *
  * The worker only pays the idle `pollIntervalMs` latency when a tick claims
@@ -20,7 +30,7 @@
  * lost-wakeup race where an event commits in the sliver between a tick and its
  * sleep.
  */
-export class OutboxWaker {
+export class OutboxWaker implements WakeSignal {
   /** Resolver of the wait currently parked, or `null` when none is waiting. */
   #wake: (() => void) | null = null;
   /** A `notify()` that arrived with no waiter parked; consumed by the next wait. */
