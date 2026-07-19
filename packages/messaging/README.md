@@ -54,10 +54,50 @@ npm install @nest-native/kafka                                     # only for th
 
 See the [00-showcase sample](https://github.com/nest-native/messaging/tree/main/sample/00-showcase) for a runnable end-to-end example on SQLite.
 
+### Cutting the idle latency (`OutboxWaker`)
+
+`runWorkerLoop` is self-clocking: after a tick that claims a full batch it loops
+again immediately to drain the backlog, and it only waits `pollIntervalMs`
+(default 2s) when a tick claims **nothing**. So that interval is the worst-case
+latency for a *lone* event landing in an otherwise-idle outbox — not a per-event
+tax. Under load, throughput is never gated by it.
+
+When even that idle latency matters — a user-facing "we've got it" sitting behind
+an outbox event — turning the poll interval down works but has a floor and a
+DB-load cost. The better lever is an **in-process wake**: pass an `OutboxWaker`
+to the loop and `notify()` it right after the enqueueing transaction commits, so
+the worker relays now instead of on the next poll. Polling stays the backstop, so
+a missed or absent `notify()` never stalls delivery — it only widens latency back
+to one interval.
+
+```ts
+import { OutboxWaker, runWorkerLoop } from '@nest-native/messaging';
+
+const waker = new OutboxWaker();
+
+// worker: the idle wait is now woken early by notify()
+runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal });
+
+// request path: notify AFTER the transaction commits (before commit the row
+// isn't visible to the claimer's own transaction yet)
+await this.txHost.withTransaction(async () => {
+  await this.outbox.enqueue({ topic: 'order.paid', payload });
+  // ...business writes...
+});
+waker.notify();
+```
+
+**Same process only.** `notify()` can't cross process boundaries — a worker in a
+*separate* process from the producer still relies on polling. A cross-process wake
+(e.g. Postgres `LISTEN`/`NOTIFY`) is a planned, dialect-specific follow-up;
+`OutboxWaker` is the dialect-agnostic half that works today and gives that bridge
+something to drive.
+
 ## Status & scope
 
 - **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
-- **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
+- **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; an `OutboxWaker` cuts that idle wait for same-process workers (see above).
+- **Roadmap:** a cross-process wake (Postgres `LISTEN`/`NOTIFY`) to extend `OutboxWaker` past process boundaries; additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
 Part of the [nest-native](https://github.com/nest-native) family. Not affiliated with the NestJS core team. MIT licensed.

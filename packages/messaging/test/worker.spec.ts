@@ -3,6 +3,7 @@ import { strict as assert } from 'node:assert';
 import { getEventListeners } from 'node:events';
 import { describe, test } from 'node:test';
 import type { OutboxClaimer, TickReport } from '../outbox-claimer.service';
+import { OutboxWaker } from '../outbox-waker';
 import { runWorkerLoop } from '../outbox-worker';
 
 const report = (claimed: number): TickReport => ({
@@ -191,6 +192,45 @@ describe('runWorkerLoop', () => {
     );
     assert.deepEqual(errors, []);
     assert.equal(calls, 2);
+  });
+
+  test('a waker cuts the idle wait short instead of sleeping the full interval', async () => {
+    // The idle wait is set to 8s — far above the runtime bound — so the test can
+    // only pass if the waker's notify() (not the timer) ends the wait.
+    const controller = new AbortController();
+    const waker = new OutboxWaker();
+    const timestamps: number[] = [];
+    let calls = 0;
+    await runWorkerLoop(
+      fakeClaimer(async () => {
+        calls += 1;
+        timestamps.push(Date.now());
+        if (calls === 1) setTimeout(() => waker.notify(), 20);
+        if (calls === 2) controller.abort();
+        return report(0); // always idle, so every gap is a waker-woken wait
+      }),
+      { pollIntervalMs: 8_000, signal: controller.signal, waker },
+    );
+    assert.equal(calls, 2);
+    const gap = timestamps[1]! - timestamps[0]!;
+    assert.ok(gap < 1_500, `waker should cut the 8s idle wait, got ${gap}ms`);
+  });
+
+  test('a waker-driven loop still stops promptly on abort (waker path honours the signal)', async () => {
+    const controller = new AbortController();
+    const waker = new OutboxWaker();
+    let calls = 0;
+    const start = Date.now();
+    await runWorkerLoop(
+      fakeClaimer(async () => {
+        calls += 1;
+        setTimeout(() => controller.abort(), 25); // abort mid idle-wait
+        return report(0);
+      }),
+      { pollIntervalMs: 8_000, signal: controller.signal, waker },
+    );
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - start < 4_000, 'abort must short-circuit the waker wait');
   });
 
   test('runs without a signal: the loop keeps going (and never settles)', async () => {

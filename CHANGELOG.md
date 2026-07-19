@@ -8,6 +8,17 @@ package release is useful for users.
 
 ## Unreleased
 
+- **Added `OutboxWaker` — an in-process wake for the worker loop.** The worker
+  only waits `pollIntervalMs` when a tick claims nothing, so that interval is the
+  worst-case latency for a lone event landing in an idle outbox. Pass an
+  `OutboxWaker` to `runWorkerLoop({ waker })` and call `waker.notify()` after the
+  enqueueing transaction commits to cut that idle wait short — the worker relays
+  immediately instead of on the next poll. Polling stays the backstop, so a missed
+  or absent `notify()` never stalls delivery (it only widens latency back to one
+  interval), and wakes are latched so an event committed in the sliver between a
+  tick and its sleep is never lost. Same-process only; a cross-process wake
+  (Postgres `LISTEN`/`NOTIFY`) is a planned follow-up. Opt-in and fully backward
+  compatible — omit the `waker` and the loop is an unchanged pure poller.
 - Internal simplifications surfaced by the full-package mutation pass (no
   behavior change): `headerToString` drops a redundant `undefined` guard
   (the fall-through already returns `undefined`), and the Kafka inbox
