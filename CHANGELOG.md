@@ -19,6 +19,21 @@ package release is useful for users.
   tick and its sleep is never lost. Same-process only; a cross-process wake
   (Postgres `LISTEN`/`NOTIFY`) is a planned follow-up. Opt-in and fully backward
   compatible — omit the `waker` and the loop is an unchanged pure poller.
+- **Added `WakeSocketServer` / `WakeSocketClient` — the cross-process wake for
+  processes on the same machine** (the classic app + `start:worker` split sharing
+  one database, where an in-memory `notify()` can't cross the boundary). The
+  worker listens on a unix domain socket (Windows: a `\\.\pipe\…` name) and feeds
+  incoming connections into its `OutboxWaker`; producers hold a
+  `WakeSocketClient` on the same path and `notify()` after the enqueueing
+  transaction commits — fire-and-forget, never throwing into the request path.
+  Built on `node:net` alone (zero new dependencies, dialect-agnostic; for the
+  SQLite store this covers every supported deployment, since processes sharing a
+  SQLite file are on one machine by definition). The server recovers a stale
+  socket path left by a crashed predecessor and refuses a path a live server
+  owns; polling remains the backstop, so a failed wake only costs one poll
+  interval. The shared `WakeSignal` interface lets producers swap
+  `OutboxWaker` ↔ `WakeSocketClient` without touching domain code. A
+  cross-MACHINE wake (Postgres `LISTEN`/`NOTIFY`) remains the planned follow-up.
 - Internal simplifications surfaced by the full-package mutation pass (no
   behavior change): `headerToString` drops a redundant `undefined` guard
   (the fall-through already returns `undefined`), and the Kafka inbox
