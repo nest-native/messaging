@@ -201,6 +201,27 @@ jobs:
             test-step-duration-ms.txt
           if-no-files-found: error
 
+  better-sqlite3-latest-major:
+    name: better-sqlite3 13 compatibility (Node 22)
+    runs-on: ubuntu-latest
+    # The published peer range allows better-sqlite3 ^11 || ^12 || ^13, but the
+    # devDependency stays on 12.x so the Node-20 legs above remain installable
+    # (better-sqlite3 13 requires Node >=22). This leg is what makes the v13 end
+    # of that range a tested claim rather than an assumption.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install with better-sqlite3 13
+        run: |
+          npm install --no-save --workspace-root better-sqlite3@^13.0.0
+          node -e "console.log('better-sqlite3', require('better-sqlite3/package.json').version)"
+
+      - name: Run the suite against better-sqlite3 13
+        run: npm test
+
   release-and-security:
     name: Release and security checks
     runs-on: ubuntu-latest
