@@ -16,7 +16,7 @@
     "@nestjs/common": "^11.1.28",
     "@nestjs/core": "^11.1.28",
     "@nestjs/microservices": "^11.1.28",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.1",
     "drizzle-orm": "^0.45.2",
     "nestjs-cls": "^6.2.1",
     "reflect-metadata": "^0.2.2",
