@@ -20,7 +20,13 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   in-process default and the `@nest-native/messaging/kafka` adapter implement it.
   The core never imports a broker client.
 - Support line: Node `>=20`, NestJS `11.x`, Drizzle `0.44`/`0.45`,
-  `@nestjs-cls/transactional` `3.x`.
+  `@nestjs-cls/transactional` `3.x`, `better-sqlite3` `11.x`/`12.x`/`13.x`.
+  **Peer majors are widened, never swapped**: the devDependency stays on the
+  newest major that still installs on the OLDEST supported Node (today 12.x,
+  because `better-sqlite3` 13 requires Node `>=22`), and a dedicated CI leg
+  exercises the newest supported major so both ends of the range are tested
+  rather than assumed. A dependabot PR that bumps such a devDependency past
+  that line is declined — merging it would silently drop a supported Node.
 
 ### 2. Public API
 - `MessagingModule.forRoot({ store, transport })` / `forRootAsync(...)`.

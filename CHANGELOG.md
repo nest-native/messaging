@@ -6,6 +6,20 @@ This project follows semantic versioning for the published package. Sample,
 documentation, and CI-only changes may remain in `Unreleased` until the next
 package release is useful for users.
 
+## 0.5.1 - 2026-07-30
+
+- **`better-sqlite3` 13 is now an allowed peer** (`^11 || ^12 || ^13`). Isolated
+  major-version review: v13 is an N-API rewrite whose JavaScript surface is
+  purely additive (`db.explain()`, `statement.toString()`) with no removals, and
+  `SqliteError.code` — which the inbox's exactly-once dedup keys on
+  (`SQLITE_CONSTRAINT_UNIQUE`) — is unchanged. The full suite (135 tests), 100%
+  coverage, and both sample smokes were run against 13.0.2 before widening, and
+  a new CI leg keeps running them there.
+  better-sqlite3 13 requires **Node >=22** while this package still supports
+  Node >=20, so the range is widened, not moved: the devDependency stays on
+  12.x. Nothing changed behaviorally; consumers on Node 22+ can now upgrade
+  their own `better-sqlite3` without an npm `ERESOLVE`.
+
 ## 0.5.0 - 2026-07-19
 
 - **Added the cross-machine wake for the Postgres dialect — `LISTEN`/`NOTIFY`.**
