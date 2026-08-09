@@ -63,6 +63,17 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   production closure. Since the package publishes `"dependencies": {}`, this is
   exactly what consumers install. Advisories confined to dev/peer/build tooling or
   the docs `website/` are tracked by Dependabot but do not block releases.
+- **The docs audit reports, it does not gate.** `security:audit` hard-fails only
+  on the *published* surface; `security:audit:docs` still runs and prints, but
+  cannot fail the build. This makes the gate match the rule above — website
+  advisories cannot reach consumers, so they must not block every PR in the
+  repo. Precedent: `@nest-native/cache` and `@nest-native/trpc` were already
+  package-only. Trigger: `image-size` (GHSA-w3rx-r6r6-pgpr,
+  GHSA-5p2g-fcmc-qvqq) has NO patched version — 2.0.2 is both the latest
+  release and vulnerable — and arrives through `@docusaurus/mdx-loader`, so the
+  gate was unfixable by any dependency change. Dependabot still tracks the
+  website tree; fix docs advisories when a fix exists.
+
 - **Strictness scope.** The non-negotiables (100% coverage, complexity ≤ 15, zero
   published runtime deps, isolated major-version review) govern the *core* package
   (`packages/messaging`). Non-core code — `sample/*`, the `website/`, dev tooling —
