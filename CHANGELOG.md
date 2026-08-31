@@ -6,6 +6,26 @@ This project follows semantic versioning for the published package. Sample,
 documentation, and CI-only changes may remain in `Unreleased` until the next
 package release is useful for users.
 
+## 0.5.2 - 2026-08-31
+
+- **`@nest-native/kafka` 0.4.x and 0.5.x are now allowed peers**
+  (`^0.2.0 || ^0.3.0 || ^0.4.0 || ^0.5.0`). The range had been capped at `^0.3.0`
+  since it was written, so once Kafka reached 0.4.0 any application depending on
+  both packages could not upgrade: `npm ci` failed outright with `ERESOLVE`,
+  naming this package's `peerOptional` as the blocker. Found by dogfooding — the
+  reference app hit it the moment it adopted Kafka 0.5.0 for request-reply.
+
+  Isolated review of the widened range: the Kafka releases in it are additive
+  (0.4.0 proved broker-restart recovery and routed raw `librdkafka` properties,
+  0.4.1 extended that routing to the undotted ones, 0.5.0 added opt-in
+  request-reply). The surfaces this package uses — `KafkaProducerService.send`,
+  the consumer decorators, and `KafkaContext` — are unchanged across all three.
+  Verified rather than assumed: the suite, the 100% coverage gate, the
+  complexity gate and both samples run green against Kafka 0.5.0, and the Kafka
+  sample typechecks against it.
+
+  No code changed; this is the peer range and the sample pins only.
+
 ## 0.5.1 - 2026-07-30
 
 - **`better-sqlite3` 13 is now an allowed peer** (`^11 || ^12 || ^13`). Isolated
