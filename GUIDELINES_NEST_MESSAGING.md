@@ -19,7 +19,7 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
 - **Transport seam.** The claimer publishes through `OutboxTransport`; the
   in-process default and the `@nest-native/messaging/kafka` adapter implement it.
   The core never imports a broker client.
-- Support line: Node `>=20`, NestJS `11.x`, Drizzle `0.44`/`0.45`,
+- Support line: Node `>=22`, NestJS `11.x`, Drizzle `0.44`/`0.45`,
   `@nestjs-cls/transactional` `3.x`, `better-sqlite3` `11.x`/`12.x`/`13.x`.
   **Peer majors are widened, never swapped**: the devDependency stays on the
   newest major that still installs on the OLDEST supported Node (today 12.x,
