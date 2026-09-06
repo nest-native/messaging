@@ -51,6 +51,27 @@ npm install @nest-native/kafka                                     # only for th
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
+## Compatibility
+
+| Runtime | Supported line |
+| --- | --- |
+| Node.js | `>=22` (`>=22.12` with NestJS 12 — see the note below the table) |
+| NestJS | `^11.0.0 \|\| ^12.0.0` |
+| Drizzle ORM | `^0.44.0 \|\| ^0.45.0` |
+| `@nestjs-cls/transactional` | `^3.0.0` — on NestJS 12, `3.3+` (with `nestjs-cls` `6.3+`): the first releases whose own peer ranges admit 12 |
+| `better-sqlite3` | `^11.0.0 \|\| ^12.0.0 \|\| ^13.0.0` |
+| `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
+
+Both ends of the NestJS range are tested, not assumed: the default lockfile
+keeps the suite on 11.x, and a dedicated CI leg resolves the tree against
+`@nestjs/*@^12` in every workspace and reruns the suite, the package build, and
+both samples. NestJS 11 runs on any Node.js `>=22`. NestJS 12 is ESM-only;
+loading it from CommonJS (this package, and both samples) goes through Node's
+`require(esm)`, which is behind a flag before Node.js 22.12.0, so the 12 end of
+the range needs Node.js `>=22.12` — a current Node 22, or 24. `engines` stays
+`>=22` because the 11 end does not need more; Node 22.0–22.11 satisfies it and
+still cannot load NestJS 12.
+
 ## Quality Gates
 
 Every PR runs the full gate — build, typecheck, coverage with `c8` enforced at
@@ -61,6 +82,20 @@ and a supply-chain audit:
 ```bash
 npm run ci
 ```
+
+CI adds two compatibility legs on top of that gate, one per peer whose newest
+major the default lockfile does not install: `better-sqlite3` 13, and NestJS 12
+(the lockfile dropped and the tree resolved with `--no-save` against
+`@nestjs/*@^12` in every workspace, proven to resolve 12 from inside the
+package and each sample, then the suite, the build, and the sample matrix).
+Both ends of every published peer range are tested claims. The NestJS 12
+install is a fresh-checkout recipe — it only resolves from an empty
+`node_modules` with no lockfile, which is what a CI runner has. On top of an
+existing install, the hidden `node_modules/.package-lock.json` replays the
+ERESOLVE that dropping the lockfile avoids, and every workspace stays on 11;
+to rerun that leg locally, start from a clean worktree or
+`rm -rf node_modules package-lock.json` first (the exact command is in
+`.github/workflows/ci.yml`).
 
 Two **optional, local-only** layers sit on top (neither runs in CI, and forks
 work without them):

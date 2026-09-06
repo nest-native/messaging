@@ -19,7 +19,8 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
 - **Transport seam.** The claimer publishes through `OutboxTransport`; the
   in-process default and the `@nest-native/messaging/kafka` adapter implement it.
   The core never imports a broker client.
-- Support line: Node `>=22`, NestJS `11.x`, Drizzle `0.44`/`0.45`,
+- Support line: Node `>=22` (`>=22.12` on the NestJS 12 end — see section 3),
+  NestJS `^11.0.0 || ^12.0.0`, Drizzle `0.44`/`0.45`,
   `@nestjs-cls/transactional` `3.x`, `better-sqlite3` `11.x`/`12.x`/`13.x`.
   **Peer majors are widened, never swapped**: the devDependency stays on the
   newest major that still installs on the OLDEST supported Node (today 12.x,
@@ -27,6 +28,41 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   exercises the newest supported major so both ends of the range are tested
   rather than assumed. A dependabot PR that bumps such a devDependency past
   that line is declined — merging it would silently drop a supported Node.
+- **The same recipe, applied to NestJS.** NestJS 12 (2026-08) is supported as
+  `^11.0.0 || ^12.0.0` on `@nestjs/common` and `@nestjs/core`; the `@nestjs/*`
+  devDependencies and the lockfile stay on 11.x, so every default CI job keeps
+  testing the 11 end, and the `nestjs-latest-major` leg resolves the tree
+  against 12 and runs the suite, the package build, and the sample matrix.
+  Three details of that leg are load-bearing. It installs with
+  `npm install --no-save --workspaces --include-workspace-root`, because the
+  samples declare `@nestjs/*` as `^11.x` and a root-only install satisfies them
+  with a *nested* 11 while the root moves to 12 — a second 11 leg wearing a 12
+  label; the leg therefore asserts from inside `packages/messaging` and each
+  sample that `@nestjs/core` resolves to 12 before it runs anything. It drops
+  the lockfile from its throwaway checkout first, because — unlike the
+  `better-sqlite3` leg — npm cannot layer this set on top of the 11 lockfile:
+  it refuses to replace the `@nestjs/core` ⇄ `@nestjs/microservices` peer pair
+  in place (ERESOLVE on core@12's optional peer `microservices@^12` against the
+  lockfile's `microservices@11`, whatever else is in the set), so the 12 tree
+  is resolved fresh and nothing is written back: `--no-save` writes no
+  manifest and produces no lockfile, and the checkout is discarded. That
+  makes the command a fresh-checkout recipe — an empty `node_modules` and no
+  lockfile — not one to run on an existing install: with the 11 tree already
+  in `node_modules`, its hidden `node_modules/.package-lock.json` replays the
+  same ERESOLVE after `rm package-lock.json`, and every workspace stays on 11.
+  To reproduce the leg locally, start from a clean worktree or
+  `rm -rf node_modules package-lock.json` first. And it re-resolves the
+  neighbours whose own peer ranges gate 12 — `nestjs-cls` 6.3,
+  `@nestjs-cls/transactional` 3.3 (6.2 / 3.2 say `< 12`) and
+  `@nest-native/kafka` 0.5.1 — instead of hiding the gap with
+  `--legacy-peer-deps`; a peer that does not admit 12 is a real finding, and
+  the leg is red until the peer ships. Dependabot cannot deliver a NestJS major:
+  the `@nestjs/*` packages peer on each other, so one-package-per-PR bumps fail
+  `npm ci` with ERESOLVE before a single test runs (NestJS 12 opened fifteen
+  such PRs across the org). The `messaging-peer` group in
+  `.github/dependabot.yml` therefore groups majors too, so the next major
+  arrives as one PR whose result carries information — and even that PR is
+  evidence for the widening recipe above, not a replacement for it.
 
 ### 2. Public API
 - `MessagingModule.forRoot({ store, transport })` / `forRootAsync(...)`.
@@ -47,6 +83,47 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   DB-only handler is fine. Document this on every public surface.
 - Keep the wire contract a single in-package source of truth shared by the Kafka
   transport and the inbox consumer.
+- **NestJS 12 is ESM-only: never import a directory index from `@nestjs/*`.**
+  `@nestjs/common` and `@nestjs/core` 12 ship an exports map of
+  `{".", "./internal", "./*.js", "./*": "./*.js"}`. A deep import of a *file*
+  (`@nestjs/core/injector/constants`) still resolves under it; a deep import of
+  a *directory* (`@nestjs/common/interfaces`) does not, because there is no
+  `interfaces.js` and ESM never completes a directory to its `index`. That one
+  import was the whole NestJS 12 failure in `@nest-native/kafka` and
+  `@nest-native/trpc`. This package makes **no** deep import into `@nestjs/*`
+  at all — everything comes from the package roots — and that is the rule:
+  keep it that way. Should a deep import ever become necessary, it names a
+  file, and it lands together with the scanner test the kafka and trpc repos
+  carry (`test/nestjs-deep-imports.spec.ts`: every `@nestjs/<pkg>/<subpath>`
+  import must resolve to a `.js` / `.ts` / `.d.ts` file inside the installed
+  package, never a directory) so the trap cannot come back unnoticed. Do not
+  reach for `@nestjs/common/interfaces/controllers/controller.interface` as a
+  workaround either — still an internal path, and 12 defines `Controller` as
+  plain `object`. Loading NestJS 12 from this CommonJS package goes through
+  Node's `require(esm)`, which is behind a flag before Node 22.12.0 (and
+  20.19, below this package's floor), so the 12 end of the range needs Node
+  `>=22.12`. `engines` stays `>=22`: it describes the whole peer range, and
+  the 11 end runs on any Node 22. Node 22.0–22.11 satisfies `engines` and
+  still cannot load NestJS 12, which is why every place that states the
+  floor — the support line above, the README and docs compatibility tables,
+  the changelog — carries the `>=22.12` qualifier for 12 instead of leaving
+  `>=22` to imply it. Raising `engines` to `>=22.12` would be a floor change
+  for NestJS 11 users and is a separate decision, not part of widening the
+  peer range.
+- **Lifecycle-hook order across providers is not a contract.** NestJS 12
+  reordered lifecycle hooks (`onModuleInit`, `onApplicationBootstrap`,
+  `onModuleDestroy`, `beforeApplicationShutdown`, `onApplicationShutdown`) by
+  the component's level in the module hierarchy, so the order in which two
+  providers see the *same* hook differs between 11 and 12. The phase order did
+  not change. This package implements no lifecycle hook itself; the only
+  sequencing it relies on is phase-level — in-process consumers register on the
+  `OutboxRegistry` in their own `onModuleInit`, and the claimer that reads the
+  registry runs after bootstrap, from the worker loop the application starts.
+  Nothing assumes an order among providers within a phase, and nothing may
+  start to: a change that needs another provider's same-phase hook to have run
+  first expresses that as a dependency (inject it, or move the work to an
+  earlier phase), never as an assumption about hook sequencing. No test
+  asserts a within-phase hook order, and none should.
 
 ### 4. Non-negotiable style
 - NestJS naming + DI conventions; full enhancer-pipeline compatibility for the
