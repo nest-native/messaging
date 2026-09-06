@@ -240,7 +240,12 @@ jobs:
     # lockfile from this throwaway checkout and resolves the 12 set fresh -
     # neighbours float to their newest in-range versions, which is also what a
     # consumer adopting 12 gets. Nothing is written back: --no-save leaves
-    # every package.json alone and no lockfile is produced.
+    # every package.json alone and no lockfile is produced. This only resolves
+    # from a fresh checkout - an empty node_modules and no lockfile, which is
+    # what a runner has: on top of an existing install the hidden
+    # node_modules/.package-lock.json replays the same ERESOLVE and every
+    # workspace stays on 11. To rerun the leg locally, use a clean worktree or
+    # rm -rf node_modules package-lock.json first.
     #
     # --workspaces matters: the samples declare @nestjs/* as ^11.x, and a
     # root-only install would satisfy them with a nested 11 while the root

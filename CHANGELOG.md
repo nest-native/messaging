@@ -20,12 +20,14 @@ package release is useful for users.
   build, and both samples were run against 12.0.1 before widening, and a new
   CI leg keeps running them there — the tree is resolved against 12 in every
   workspace and each sample proves it resolves 12 before anything runs. The
-  `@nestjs/*` devDependencies stay on 11.x. On NestJS 12 you also need the
-  first releases of the neighbours whose own peer ranges admit it:
-  `nestjs-cls` 6.3, `@nestjs-cls/transactional` 3.3 and, for the Kafka
-  transport, `@nest-native/kafka` 0.5.1. Dependabot's peer group now includes
-  majors, so the next NestJS major arrives as one installable PR instead of
-  one ERESOLVE per package.
+  `@nestjs/*` devDependencies stay on 11.x. The 12 end of the range needs
+  Node.js `>=22.12`, where `require(esm)` is no longer behind a flag;
+  `engines` stays `>=22` because the 11 end does not need more. On NestJS 12
+  you also need the first releases of the neighbours whose own peer ranges
+  admit it: `nestjs-cls` 6.3, `@nestjs-cls/transactional` 3.3 and, for the
+  Kafka transport, `@nest-native/kafka` 0.5.1. Dependabot's peer group now
+  includes majors, so the next NestJS major arrives as one installable PR
+  instead of one ERESOLVE per package.
 
 ## 0.5.2 - 2026-08-31
 

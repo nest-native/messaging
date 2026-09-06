@@ -19,7 +19,8 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
 - **Transport seam.** The claimer publishes through `OutboxTransport`; the
   in-process default and the `@nest-native/messaging/kafka` adapter implement it.
   The core never imports a broker client.
-- Support line: Node `>=22`, NestJS `^11.0.0 || ^12.0.0`, Drizzle `0.44`/`0.45`,
+- Support line: Node `>=22` (`>=22.12` on the NestJS 12 end — see section 3),
+  NestJS `^11.0.0 || ^12.0.0`, Drizzle `0.44`/`0.45`,
   `@nestjs-cls/transactional` `3.x`, `better-sqlite3` `11.x`/`12.x`/`13.x`.
   **Peer majors are widened, never swapped**: the devDependency stays on the
   newest major that still installs on the OLDEST supported Node (today 12.x,
@@ -43,7 +44,14 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   it refuses to replace the `@nestjs/core` ⇄ `@nestjs/microservices` peer pair
   in place (ERESOLVE on core@12's optional peer `microservices@^12` against the
   lockfile's `microservices@11`, whatever else is in the set), so the 12 tree
-  is resolved fresh and nothing is written back. And it re-resolves the
+  is resolved fresh and nothing is written back: `--no-save` writes no
+  manifest and produces no lockfile, and the checkout is discarded. That
+  makes the command a fresh-checkout recipe — an empty `node_modules` and no
+  lockfile — not one to run on an existing install: with the 11 tree already
+  in `node_modules`, its hidden `node_modules/.package-lock.json` replays the
+  same ERESOLVE after `rm package-lock.json`, and every workspace stays on 11.
+  To reproduce the leg locally, start from a clean worktree or
+  `rm -rf node_modules package-lock.json` first. And it re-resolves the
   neighbours whose own peer ranges gate 12 — `nestjs-cls` 6.3,
   `@nestjs-cls/transactional` 3.3 (6.2 / 3.2 say `< 12`) and
   `@nest-native/kafka` 0.5.1 — instead of hiding the gap with
@@ -92,7 +100,16 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   reach for `@nestjs/common/interfaces/controllers/controller.interface` as a
   workaround either — still an internal path, and 12 defines `Controller` as
   plain `object`. Loading NestJS 12 from this CommonJS package goes through
-  Node's `require(esm)`, unflagged on Node `>=22.12` — covered by `engines`.
+  Node's `require(esm)`, which is behind a flag before Node 22.12.0 (and
+  20.19, below this package's floor), so the 12 end of the range needs Node
+  `>=22.12`. `engines` stays `>=22`: it describes the whole peer range, and
+  the 11 end runs on any Node 22. Node 22.0–22.11 satisfies `engines` and
+  still cannot load NestJS 12, which is why every place that states the
+  floor — the support line above, the README and docs compatibility tables,
+  the changelog — carries the `>=22.12` qualifier for 12 instead of leaving
+  `>=22` to imply it. Raising `engines` to `>=22.12` would be a floor change
+  for NestJS 11 users and is a separate decision, not part of widening the
+  peer range.
 - **Lifecycle-hook order across providers is not a contract.** NestJS 12
   reordered lifecycle hooks (`onModuleInit`, `onApplicationBootstrap`,
   `onModuleDestroy`, `beforeApplicationShutdown`, `onApplicationShutdown`) by
