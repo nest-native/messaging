@@ -40,8 +40,8 @@ updates:
           - "@nestjs-cls/transactional-adapter-drizzle-orm"
           - "@nestjs/common"
           - "@nestjs/core"
+          - "@nestjs/microservices"
           - "@nestjs/platform-express"
-          - "@nestjs/testing"
           - "better-sqlite3"
           - "drizzle-orm"
           - "nestjs-cls"
@@ -49,6 +49,7 @@ updates:
           - "reflect-metadata"
           - "rxjs"
           - "zod"
+          - "@nestjs/testing"
 
   - package-ecosystem: "npm"
     directory: "/website"
