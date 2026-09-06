@@ -88,4 +88,24 @@ or the [API Reference](./api-reference.md) for the full surface.
   is the application-level outbox, written through your ORM transaction. Generic
   multi-broker routing is also out of scope.
 
+## Compatibility
+
+| Runtime | Supported line |
+| --- | --- |
+| Node.js | `>=22` |
+| NestJS | `^11.0.0 \|\| ^12.0.0` |
+| Drizzle ORM | `^0.44.0 \|\| ^0.45.0` |
+| `@nestjs-cls/transactional` | `^3.0.0` — on NestJS 12, `3.3+` (with `nestjs-cls` `6.3+`): the first releases whose own peer ranges admit 12 |
+| `better-sqlite3` | `^11.0.0 \|\| ^12.0.0 \|\| ^13.0.0` |
+| `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
+
+Both ends of the NestJS range are tested, not assumed: the default lockfile
+keeps the suite on 11.x, and a dedicated CI leg resolves the tree against
+`@nestjs/*@^12` in every workspace and reruns the suite, the package build, and
+both samples. NestJS 12 is ESM-only; loading it from CommonJS (this package,
+and both samples) goes through Node's `require(esm)`, unflagged on Node
+`>=22.12`, so run NestJS 12 on a current Node 22 or 24. NestJS 12 also reorders lifecycle hooks
+across providers by module-hierarchy level; this package relies on no
+cross-provider hook order, so nothing changes for it.
+
 Part of the [nest-native](https://github.com/nest-native) family. MIT licensed.

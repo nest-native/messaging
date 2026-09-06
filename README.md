@@ -51,6 +51,24 @@ npm install @nest-native/kafka                                     # only for th
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
+## Compatibility
+
+| Runtime | Supported line |
+| --- | --- |
+| Node.js | `>=22` |
+| NestJS | `^11.0.0 \|\| ^12.0.0` |
+| Drizzle ORM | `^0.44.0 \|\| ^0.45.0` |
+| `@nestjs-cls/transactional` | `^3.0.0` — on NestJS 12, `3.3+` (with `nestjs-cls` `6.3+`): the first releases whose own peer ranges admit 12 |
+| `better-sqlite3` | `^11.0.0 \|\| ^12.0.0 \|\| ^13.0.0` |
+| `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
+
+Both ends of the NestJS range are tested, not assumed: the default lockfile
+keeps the suite on 11.x, and a dedicated CI leg resolves the tree against
+`@nestjs/*@^12` in every workspace and reruns the suite, the package build, and
+both samples. NestJS 12 is ESM-only; loading it from CommonJS (this package,
+and both samples) goes through Node's `require(esm)`, unflagged on Node
+`>=22.12`, so run NestJS 12 on a current Node 22 or 24.
+
 ## Quality Gates
 
 Every PR runs the full gate — build, typecheck, coverage with `c8` enforced at
@@ -61,6 +79,12 @@ and a supply-chain audit:
 ```bash
 npm run ci
 ```
+
+CI adds two compatibility legs on top of that gate, one per peer whose newest
+major the default lockfile does not install: `better-sqlite3` 13, and NestJS 12
+(resolved with `--no-save` in every workspace, proven to resolve 12 from
+inside the package and each sample, then the suite, the build, and the sample
+matrix). Both ends of every published peer range are tested claims.
 
 Two **optional, local-only** layers sit on top (neither runs in CI, and forks
 work without them):

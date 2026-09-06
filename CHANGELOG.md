@@ -6,6 +6,27 @@ This project follows semantic versioning for the published package. Sample,
 documentation, and CI-only changes may remain in `Unreleased` until the next
 package release is useful for users.
 
+## Unreleased
+
+- **NestJS 12 is supported.** The `@nestjs/common` and `@nestjs/core` peer
+  ranges widen from `^11.0.0` to `^11.0.0 || ^12.0.0`. Nothing in the package
+  had to change: NestJS 12 is ESM-only with an exports map under which a deep
+  import of a `@nestjs/*` *directory* (`@nestjs/common/interfaces`) no longer
+  resolves — the one thing that broke `@nest-native/kafka` and
+  `@nest-native/trpc` — and this package makes no deep import into `@nestjs/*`
+  at all; 12 also reorders lifecycle hooks across providers by
+  module-hierarchy level, and nothing here depends on a cross-provider hook
+  order. Verified rather than assumed: the full suite (135 tests), the package
+  build, and both samples were run against 12.0.1 before widening, and a new
+  CI leg keeps running them there — the tree is resolved against 12 in every
+  workspace and each sample proves it resolves 12 before anything runs. The
+  `@nestjs/*` devDependencies stay on 11.x. On NestJS 12 you also need the
+  first releases of the neighbours whose own peer ranges admit it:
+  `nestjs-cls` 6.3, `@nestjs-cls/transactional` 3.3 and, for the Kafka
+  transport, `@nest-native/kafka` 0.5.1. Dependabot's peer group now includes
+  majors, so the next NestJS major arrives as one installable PR instead of
+  one ERESOLVE per package.
+
 ## 0.5.2 - 2026-08-31
 
 - **`@nest-native/kafka` 0.4.x and 0.5.x are now allowed peers**
