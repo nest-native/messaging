@@ -8,6 +8,8 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.6.0
+
 - **NestJS 12 is supported.** The `@nestjs/common` and `@nestjs/core` peer
   ranges widen from `^11.0.0` to `^11.0.0 || ^12.0.0`. Nothing in the package
   had to change: NestJS 12 is ESM-only with an exports map under which a deep
