@@ -63,8 +63,11 @@ npm install @nest-native/kafka                                     # only for th
 | `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
 
 Both ends of the NestJS range are tested, not assumed: the default lockfile
-keeps the suite on 11.x, and a dedicated CI leg resolves the tree against
-`@nestjs/*@^12` in every workspace and reruns the suite, the package build, and
+keeps the suite on an 11.x in the middle of the range, and the `nestjs-compat`
+CI matrix resolves the tree against each end in every workspace — `11.0.0`
+pinned exactly (nothing this package uses was added by a later 11.x), and
+`^12` — proves every workspace resolves exactly that and every peer range in
+the NestJS ecosystem is satisfied, and reruns the suite, the package build, and
 both samples. NestJS 11 runs on any Node.js `>=22`. NestJS 12 is ESM-only;
 loading it from CommonJS (this package, and both samples) goes through Node's
 `require(esm)`, which is behind a flag before Node.js 22.12.0, so the 12 end of
@@ -83,13 +86,14 @@ and a supply-chain audit:
 npm run ci
 ```
 
-CI adds two compatibility legs on top of that gate, one per peer whose newest
-major the default lockfile does not install: `better-sqlite3` 13, and NestJS 12
-(the lockfile dropped and the tree resolved with `--no-save` against
-`@nestjs/*@^12` in every workspace, proven to resolve 12 from inside the
-package and each sample, then the suite, the build, and the sample matrix).
-Both ends of every published peer range are tested claims. The NestJS 12
-install is a fresh-checkout recipe — it only resolves from an empty
+CI adds compatibility legs on top of that gate for the ends of every published
+peer range the default lockfile does not install: `better-sqlite3` 13, and the
+`nestjs-compat` matrix for NestJS `11.0.0` (pinned exactly) and `^12` (the
+lockfile dropped and the tree resolved with `--no-save` against that end in
+every workspace, proven from inside the package and each sample to resolve
+exactly it with every NestJS-ecosystem peer range satisfied, then the suite,
+the build, and the sample matrix). Both ends of every published peer range are
+tested claims. The NestJS install is a fresh-checkout recipe — it only resolves from an empty
 `node_modules` with no lockfile, which is what a CI runner has. On top of an
 existing install, the hidden `node_modules/.package-lock.json` replays the
 ERESOLVE that dropping the lockfile avoids, and every workspace stays on 11;

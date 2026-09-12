@@ -100,8 +100,11 @@ or the [API Reference](./api-reference.md) for the full surface.
 | `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
 
 Both ends of the NestJS range are tested, not assumed: the default lockfile
-keeps the suite on 11.x, and a dedicated CI leg resolves the tree against
-`@nestjs/*@^12` in every workspace and reruns the suite, the package build, and
+keeps the suite on an 11.x in the middle of the range, and the `nestjs-compat`
+CI matrix resolves the tree against each end in every workspace — `11.0.0`
+pinned exactly (nothing this package uses was added by a later 11.x), and
+`^12` — proves every workspace resolves exactly that and every peer range in
+the NestJS ecosystem is satisfied, and reruns the suite, the package build, and
 both samples. NestJS 11 runs on any Node.js `>=22`. NestJS 12 is ESM-only;
 loading it from CommonJS (this package, and both samples) goes through Node's
 `require(esm)`, which is behind a flag before Node.js 22.12.0, so the 12 end of
