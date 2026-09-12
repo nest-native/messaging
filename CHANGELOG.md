@@ -8,6 +8,19 @@ package release is useful for users.
 
 ## Unreleased
 
+- **Both ends of the NestJS peer range are now CI legs.** The single
+  `nestjs-latest-major` job that resolved the tree against `^12` is replaced
+  by a `nestjs-compat` matrix: an `11 floor` leg pinned exactly to `11.0.0`
+  (the oldest graph the published range can produce, with the reason next to
+  the pin) and a `12` leg on `^12.0.0`, both fresh-resolved. Each leg runs
+  the new `scripts/check-nestjs-resolution.mjs`, which proves the exact
+  version from inside every workspace and checks every peer range in the
+  NestJS ecosystem against the final tree (npm overrides a peer conflict it
+  can override with a warning and exit 0). The same script runs against the
+  lockfile in `release:check`, and found the lockfile hoisting
+  `@nestjs/microservices` 11.1.27 at the root while sample 01 carried a nested
+  11.2.1 — repaired (the root now hoists 11.2.3). No published range changed.
+
 ## 0.6.0
 
 - **NestJS 12 is supported.** The `@nestjs/common` and `@nestjs/core` peer

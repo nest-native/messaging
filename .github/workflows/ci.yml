@@ -222,84 +222,89 @@ jobs:
       - name: Run the suite against better-sqlite3 13
         run: npm test
 
-  nestjs-latest-major:
-    name: NestJS 12 compatibility (Node 22)
+  nestjs-compat:
+    name: NestJS ${{ matrix.nest.label }} compatibility (Node 22)
     runs-on: ubuntu-latest
-    # The published peer range allows @nestjs/* ^11 || ^12, but the
-    # devDependencies and the lockfile every other job installs stay on 11.x so
-    # the default suite keeps testing the older end. This leg resolves the
-    # tree against 12 instead and runs the suite, the package build, and the
-    # sample matrix, which makes the 12 end of the range a tested claim rather
-    # than an assumption.
+    # The published peer range allows @nestjs/* ^11 || ^12. The devDependencies
+    # and the lockfile every other job installs stay on the 11.x in the middle
+    # of that range, so this matrix is what makes its two ENDS tested claims:
+    # each leg resolves the tree against one end and runs the suite, the
+    # package build, and the sample matrix against it.
     #
-    # Unlike the better-sqlite3 leg, this one cannot layer 12 on top of the
-    # lockfile with --no-save: npm refuses to replace the @nestjs/core <->
+    # Unlike the better-sqlite3 leg, a leg here cannot layer its set on top of
+    # the lockfile with --no-save: npm refuses to replace the @nestjs/core <->
     # @nestjs/microservices peer pair in place in this tree (ERESOLVE on
     # core@12's optional peer microservices@^12 against the lockfile's
-    # microservices@11, whatever else is in the set), so the leg drops the
-    # lockfile from this throwaway checkout and resolves the 12 set fresh -
-    # neighbours float to their newest in-range versions, which is also what a
-    # consumer adopting 12 gets. Nothing is written back: --no-save leaves
-    # every package.json alone and no lockfile is produced. This only resolves
-    # from a fresh checkout - an empty node_modules and no lockfile, which is
-    # what a runner has: on top of an existing install the hidden
-    # node_modules/.package-lock.json replays the same ERESOLVE and every
-    # workspace stays on 11. To rerun the leg locally, use a clean worktree or
+    # microservices@11, whatever else is in the set — microservices reaches
+    # this tree only through @nest-native/kafka's peer and sample 01, never
+    # from the root). So each leg drops the lockfile from its throwaway
+    # checkout and resolves its set fresh: neighbours float to their newest
+    # in-range versions, which is also what a consumer adopting that end gets.
+    # Nothing is written back: --no-save leaves every package.json alone and
+    # no lockfile is produced. This only resolves from a fresh checkout — an
+    # empty node_modules and no lockfile, which is what a runner has: on top
+    # of an existing install the hidden node_modules/.package-lock.json
+    # replays the same ERESOLVE and every workspace stays on the lockfile's
+    # 11. To rerun a leg locally, use a clean worktree or
     # rm -rf node_modules package-lock.json first.
     #
     # --workspaces matters: the samples declare @nestjs/* as ^11.x, and a
-    # root-only install would satisfy them with a nested 11 while the root
-    # moved to 12 - a second 11 leg wearing a 12 label. The proof step below
-    # fails the job if any workspace still resolves 11.
+    # root-only install would satisfy them with a nested copy while the root
+    # moved. scripts/check-nestjs-resolution.mjs proves the version from
+    # inside every workspace (exactly, at the floor), fails on nested copies,
+    # and checks every peer range in the NestJS ecosystem — nestjs-cls,
+    # @nestjs-cls/transactional and @nest-native/kafka included — against the
+    # tree the suite will run on. That final-tree check is the gate: npm
+    # prints `ERESOLVE overriding peer dependency` and exits 0 both for a
+    # real override and for transitional states that end coherent, so the
+    # install log is diagnosis only.
     #
-    # nestjs-cls 6.3 and @nestjs-cls/transactional 3.3 are the first releases
-    # whose peer ranges admit NestJS 12 (`>= 10 < 13`; 6.2 / 3.2 say `< 12`).
-    # @nest-native/kafka 0.5.1 is the first release whose peer admits 12: until
-    # it is on npm this leg fails on that line with ETARGET - deliberately,
-    # rather than hiding the gap behind --legacy-peer-deps.
+    # The neighbours whose own peer ranges gate 12 are not named in the set:
+    # the devDependencies already sit on nestjs-cls 6.3 / @nestjs-cls/
+    # transactional 3.3 (`>= 10 < 13`; 6.2 / 3.2 say `< 12`) and
+    # @nest-native/kafka 0.5.1 (the first release whose peer admits 12), and
+    # a fresh resolve picks them up. A peer that does not admit an end is a
+    # real finding — never hide it with --legacy-peer-deps.
+    # Node is not a dimension here on purpose: 22 floats to a current 22.x,
+    # which is what require(esm) on the 12 end needs (>=22.12), and the build
+    # job already covers 24.
+    strategy:
+      fail-fast: false
+      matrix:
+        nest:
+          # 11.0.0 is the oldest graph the published range can produce: this
+          # package imports @nestjs/* roots only, and nothing it uses was
+          # added by a later 11.x. Pinned exactly so a resolve that lands
+          # elsewhere cannot pass as a floor run.
+          - { label: '11 floor', spec: '11.0.0' }
+          # ^12.0.0 floats, so a new 12.x patch is tested on the next run.
+          - { label: '12', spec: '^12.0.0' }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
 
-      - name: Resolve the tree against NestJS 12 (this job only, never saved)
+      - name: Resolve the tree against NestJS ${{ matrix.nest.label }} (this job only, never saved)
         run: |
           rm package-lock.json
           npm install --no-save --workspaces --include-workspace-root \
-            @nestjs/common@^12.0.0 \
-            @nestjs/core@^12.0.0 \
-            @nestjs/microservices@^12.0.0 \
-            @nestjs/platform-express@^12.0.0 \
-            @nestjs/testing@^12.0.0 \
-            nestjs-cls@^6.3.0 \
-            @nestjs-cls/transactional@^3.3.0 \
-            @nest-native/kafka@^0.5.1
+            "@nestjs/common@${{ matrix.nest.spec }}" \
+            "@nestjs/core@${{ matrix.nest.spec }}" \
+            "@nestjs/microservices@${{ matrix.nest.spec }}" \
+            "@nestjs/platform-express@${{ matrix.nest.spec }}" \
+            "@nestjs/testing@${{ matrix.nest.spec }}"
 
-      - name: Prove the package and every sample resolve NestJS 12
-        # NestJS 12 does not export ./package.json, so the version is read next
-        # to the resolved entry point, from inside each workspace directory.
-        run: |
-          for dir in packages/messaging sample/*/; do
-            (
-              cd "$dir" && node -e "
-                const path = require('node:path');
-                const root = path.dirname(require.resolve('@nestjs/core'));
-                const { version } = require(path.join(root, 'package.json'));
-                console.log(process.cwd(), '@nestjs/core', version, '<-', root);
-                if (!version.startsWith('12.')) process.exit(1);
-              "
-            )
-          done
-          node -e "console.log('@nest-native/kafka', require('@nest-native/kafka/package.json').version)"
+      - name: Prove every workspace resolves NestJS ${{ matrix.nest.label }}
+        run: node scripts/check-nestjs-resolution.mjs "${{ matrix.nest.spec }}"
 
-      - name: Run the suite against NestJS 12
+      - name: Run the suite against NestJS ${{ matrix.nest.label }}
         run: npm test
 
-      - name: Build the package against NestJS 12
+      - name: Build the package against NestJS ${{ matrix.nest.label }}
         run: npm run build --workspace @nest-native/messaging
 
-      - name: Run the sample matrix against NestJS 12
+      - name: Run the sample matrix against NestJS ${{ matrix.nest.label }}
         run: npm run ci:sample
 
   release-and-security:

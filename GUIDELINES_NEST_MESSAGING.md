@@ -30,39 +30,87 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   that line is declined — merging it would silently drop a supported Node.
 - **The same recipe, applied to NestJS.** NestJS 12 (2026-08) is supported as
   `^11.0.0 || ^12.0.0` on `@nestjs/common` and `@nestjs/core`; the `@nestjs/*`
-  devDependencies and the lockfile stay on 11.x, so every default CI job keeps
-  testing the 11 end, and the `nestjs-latest-major` leg resolves the tree
-  against 12 and runs the suite, the package build, and the sample matrix.
-  Three details of that leg are load-bearing. It installs with
-  `npm install --no-save --workspaces --include-workspace-root`, because the
-  samples declare `@nestjs/*` as `^11.x` and a root-only install satisfies them
-  with a *nested* 11 while the root moves to 12 — a second 11 leg wearing a 12
-  label; the leg therefore asserts from inside `packages/messaging` and each
-  sample that `@nestjs/core` resolves to 12 before it runs anything. It drops
-  the lockfile from its throwaway checkout first, because — unlike the
+  devDependencies and the lockfile stay on an 11.x in the middle of the range,
+  so every default CI job tests that, and the `nestjs-compat` matrix makes the
+  two *ends* tested claims: one entry per end resolves the tree against it and
+  runs the suite, the package build, and the sample matrix. The `11 floor`
+  entry pins `11.0.0` exactly, with the reason next to the pin (this package
+  imports `@nestjs/*` roots only and uses nothing 11.x-added); the `12` entry
+  floats on `^12.0.0`. A floor is an install-graph fact, not a source fact —
+  sibling `@nestjs/*` packages carry their own peer lines
+  (`@nestjs/platform-fastify` 11.0.0 and 11.0.1 shipped peering `^10`; every
+  `@nestjs/swagger@11.x` peers `common ^11.0.1`), so a repo that declares one
+  pins it separately and its framework floor is the oldest graph npm can
+  actually produce. Such floors are not peer-range corrections (no consumer
+  can reach the versions below them), and the published range changes only
+  if the suite actually fails at a floor. Three details of the leg are
+  load-bearing. It installs with `npm install --no-save --workspaces
+  --include-workspace-root`, because the samples declare `@nestjs/*` as
+  `^11.x` and a root-only install satisfies them with a *nested* copy while
+  the root moves — a second 11 leg wearing another label. It drops the
+  lockfile from its throwaway checkout first, because — unlike the
   `better-sqlite3` leg — npm cannot layer this set on top of the 11 lockfile:
   it refuses to replace the `@nestjs/core` ⇄ `@nestjs/microservices` peer pair
-  in place (ERESOLVE on core@12's optional peer `microservices@^12` against the
-  lockfile's `microservices@11`, whatever else is in the set), so the 12 tree
-  is resolved fresh and nothing is written back: `--no-save` writes no
-  manifest and produces no lockfile, and the checkout is discarded. That
-  makes the command a fresh-checkout recipe — an empty `node_modules` and no
-  lockfile — not one to run on an existing install: with the 11 tree already
-  in `node_modules`, its hidden `node_modules/.package-lock.json` replays the
-  same ERESOLVE after `rm package-lock.json`, and every workspace stays on 11.
-  To reproduce the leg locally, start from a clean worktree or
-  `rm -rf node_modules package-lock.json` first. And it re-resolves the
-  neighbours whose own peer ranges gate 12 — `nestjs-cls` 6.3,
-  `@nestjs-cls/transactional` 3.3 (6.2 / 3.2 say `< 12`) and
-  `@nest-native/kafka` 0.5.1 — instead of hiding the gap with
-  `--legacy-peer-deps`; a peer that does not admit 12 is a real finding, and
-  the leg is red until the peer ships. Dependabot cannot deliver a NestJS major:
+  in place (ERESOLVE on core@12's optional peer `microservices@^12` against
+  the lockfile's `microservices@11`, whatever else is in the set; verified
+  again after the lockfile drift below was repaired — `@nestjs/microservices`
+  reaches this tree only through `@nest-native/kafka`'s peer and sample 01,
+  never from the root), so each end is resolved fresh and nothing is written
+  back: `--no-save` writes no manifest and produces no lockfile, and the
+  checkout is discarded. That makes the command a fresh-checkout recipe — an
+  empty `node_modules` and no lockfile — not one to run on an existing
+  install: with the 11 tree already in `node_modules`, its hidden
+  `node_modules/.package-lock.json` replays the same ERESOLVE after
+  `rm package-lock.json`, and every workspace stays on 11. To reproduce a leg
+  locally, start from a clean worktree or `rm -rf node_modules
+  package-lock.json` first. And before a leg tests anything,
+  `scripts/check-nestjs-resolution.mjs <spec>` proves the tree is the one it
+  claims: it requires the *exact* pinned version from inside every workspace
+  (a resolve that lands elsewhere must not pass as a floor run), fails on
+  nested copies, and checks every peer range in the NestJS ecosystem — every
+  installed package at any depth that is `@nestjs/*` or peers on one:
+  `nestjs-cls`, `@nestjs-cls/transactional`, `@nest-native/kafka`, and this
+  package's own published ranges — against the tree the suite will run on.
+  The same script runs with no argument in `release:check`, against the
+  lockfile; it is what found the lockfile hoisting `@nestjs/microservices`
+  11.1.27 at the root (pulled through `@nest-native/kafka`'s peer) while
+  sample 01 carried a nested 11.2.1 — drift `npm ci` accepts, repaired with
+  `npm update @nestjs/microservices`. It is the gate because npm gives you
+  nothing better: a peer conflict npm can override is `npm warn ERESOLVE
+  overriding peer dependency` plus exit 0, which neither `npm ls` nor
+  `--strict-peer-deps` reports afterwards — and grepping the install log for
+  that warning is not a gate either, because npm also prints it for
+  transitional states that end coherent. The neighbours whose own peer ranges
+  gate 12 — `nestjs-cls` 6.3, `@nestjs-cls/transactional` 3.3 (6.2 / 3.2 say
+  `< 12`) and `@nest-native/kafka` 0.5.1 — are the devDependency floors, so a
+  fresh resolve picks them up without naming them; a peer that does not admit
+  an end is a real finding, never hidden with `--legacy-peer-deps`, and the
+  leg is red until the peer ships. Dependabot cannot deliver a NestJS major:
   the `@nestjs/*` packages peer on each other, so one-package-per-PR bumps fail
   `npm ci` with ERESOLVE before a single test runs (NestJS 12 opened fifteen
   such PRs across the org). The `messaging-peer` group in
   `.github/dependabot.yml` therefore groups majors too, so the next major
   arrives as one PR whose result carries information — and even that PR is
   evidence for the widening recipe above, not a replacement for it.
+- **The default major flips on a trigger, not per PR.** The devDependencies
+  and the lockfile move from 11 to 12 when either NestJS 12 exceeds 50% of
+  `@nestjs/core`'s weekly downloads or NestJS 11 stops receiving patches,
+  whichever comes first. Read the split from
+  `https://api.npmjs.org/versions/@nestjs%2Fcore/last-week` (on 2026-09-12:
+  11 at 71%, 10 at 19%, 12 at 5%). NestJS has no LTS; the previous major has
+  received patches for roughly a year after the next one shipped. Flipping
+  means the `12` matrix entry becomes the default install, the `11 floor`
+  entry stays, and the standing grouped dependabot PR for the peer set is
+  merged. Until then that PR stays open as the signal that the upgrade is one
+  merge away — a green run is not a reason to merge it.
+- **Dual CommonJS/ESM publishing is a dated non-goal; revisit in 2027.**
+  Every community NestJS library that supports 12 today (nestjs-cls,
+  nestjs-pino, the OpenTelemetry and throttler packages) publishes CommonJS
+  and loads 12 through `require(esm)` exactly as this package does, and no
+  consumer has asked for ESM output. An ESM or dual build is a breaking
+  change with a real cost and no demonstrated benefit, so do not start one
+  "while at it". Revisit when a consumer cannot load the package, or when
+  those community libraries move.
 
 ### 2. Public API
 - `MessagingModule.forRoot({ store, transport })` / `forRootAsync(...)`.
