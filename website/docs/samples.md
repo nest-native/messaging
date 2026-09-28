@@ -85,3 +85,88 @@ Kafka transport** — `KafkaOutboxTransport` on the producer side and an actual
 Run it from the repository root with `npm run sample:focused`. This is the closest
 you can get to the production path without a broker; point `KafkaTestModule` at a
 real cluster (or use `KafkaModule`) and the same code runs unchanged.
+
+## `02-rabbitmq`
+
+[`sample/02-rabbitmq`](https://github.com/nest-native/messaging/tree/main/sample/02-rabbitmq)
+runs the pair over a **real RabbitMQ broker**: `RabbitOutboxTransport` on the
+producer side and `RabbitInboxConsumer` on billing's queue. It is the single
+service to read first — every path the adapter promises is asserted against
+the broker, not simulated.
+
+- `rabbitmq.ts` — the application owns its `amqplib` connection
+  (`connect(url, { recovery: true })`) and declares its topology at startup;
+  the transport and the inbox only open channels on it.
+- `topology.ts` — a topic exchange for events, a **quorum** work queue with a
+  dead-letter exchange *and* a dead-letter routing key (without it, a message
+  over the delivery limit is dead-lettered with its original key, misses the
+  dead-letter queue's binding, and is dropped), and the dead-letter queue.
+- `billing.consumer.ts` — subscribes with manual acks and a prefetch, hands
+  every delivery to `RabbitInboxConsumer`, and dead-letters poison on a confirm
+  channel. When a channel closes under it — a dropped connection, a channel the
+  broker closed, a cancelled consumer — it subscribes again on new ones.
+- `scripts/smoke.ts` — places an order and asserts:
+  1. **Confirmed publish** — the claimer's row completes only after the broker
+     acked the message and did not return it; billing issues one invoice.
+  2. **Duplicate** — the same event published again (what a redelivery after a
+     lost ack looks like) is acked as a duplicate and bills nothing.
+  3. **Poison** — an invalid payload lands in the dead-letter queue with its
+     reason in an `x-error` header, instead of being requeued forever.
+  4. **Unroutable** — `order.refunded`, which no queue binds yet, comes back to
+     the transport; the attempt fails and the event stays in the outbox for a
+     retry rather than being acked into the void.
+  5. **Dropped connection** — the broker closes the application's connection
+     (through the management API, as a restart would). amqplib reconnects, the
+     transport opens a new confirm channel, billing subscribes again on its
+     own, and the next order is invoiced once.
+
+## `03-rabbitmq-services`
+
+[`sample/03-rabbitmq-services`](https://github.com/nest-native/messaging/tree/main/sample/03-rabbitmq-services)
+is the pattern doing the job it exists for: **two services**, orders and
+shipping, each a separate process with its own database file, choreographed
+over one broker.
+
+- `orders` takes an order and publishes `order.placed` through its outbox.
+- `shipping` consumes it through its inbox and, **in the same transaction**,
+  books a shipment and enqueues `shipment.scheduled` in its own outbox — the
+  dedup row, the shipment and the outgoing event commit together, so consuming
+  once and publishing once is one step.
+- `orders` consumes `shipment.scheduled` and marks the order scheduled.
+- Each service owns its queue (`shared/topology.ts`) and runs its own outbox
+  relay (`runWorkerLoop`), stopped in `beforeApplicationShutdown` so it never
+  publishes on a connection that is closing.
+- `shared/inbox-subscription.ts` keeps each consumer subscribed: whenever its
+  channel closes, it subscribes again on a new one, a second later.
+
+The smoke script forks both services and asserts: three orders cross both
+services; while shipping is **down**, orders keeps accepting and publishing
+orders and RabbitMQ keeps them in shipping's durable queue; a new shipping
+process on the same database works through that backlog; the broker then
+**drops both services' connections**, and without a restart both reconnect,
+subscribe again and carry the next orders through; an event delivered
+**again** books no second shipment and publishes no second
+`shipment.scheduled`; and both outboxes drain, one event per order.
+
+Why one process per service: `@nestjs-cls/transactional` keeps its transaction
+host in process-global state keyed by connection name, and the outbox and inbox
+use the default connection. Two Nest applications started in one process —
+in a test, say — share one transaction host, so one of them writes through the
+other's database. Give each application its own process.
+
+## Running the RabbitMQ samples
+
+Both need a broker, and its management API for the dropped-connection step.
+From the repository root:
+
+```bash
+npm run infra:up
+RABBITMQ_URL=amqp://messaging:messaging@127.0.0.1:56720 \
+RABBITMQ_MANAGEMENT_URL=http://messaging:messaging@127.0.0.1:15670 \
+  npm run sample:focused
+```
+
+Without `RABBITMQ_URL` they skip locally with a notice, and without
+`RABBITMQ_MANAGEMENT_URL` they skip only the dropped-connection step. In CI,
+the sample jobs run a RabbitMQ service container, and a missing URL fails the
+job instead.
