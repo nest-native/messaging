@@ -8,6 +8,36 @@ package release is useful for users.
 
 ## Unreleased
 
+- **RabbitMQ transport: `@nest-native/messaging/rabbitmq`.** A
+  `RabbitOutboxTransport` that relays the outbox over RabbitMQ and a
+  `RabbitInboxConsumer` that runs the idempotent inbox on RabbitMQ deliveries,
+  over the application's own `amqplib` 2 connection (`amqplib` is a new
+  optional peer; the entry point imports only its types). A publish counts as
+  done only when the broker acked it on a confirm channel and did not return
+  it — every message is published `mandatory`, because RabbitMQ otherwise acks
+  and drops a message no queue is bound for. Broker failures are plain errors,
+  retried by the claimer until `maxAttempts`, the same budget as Kafka. The
+  consumer acks processed and duplicate deliveries, requeues transient
+  failures, and dead-letters poison either by republishing it with an
+  `x-error` header or by rejecting it into the queue's own dead-letter
+  exchange. Verified against a real RabbitMQ 4 broker by a new gated spec,
+  which CI runs on every PR (below). The broker-neutral consumer helpers (`deriveDedupKey`,
+  `actionForError`, …) moved to the package root; `/kafka` still exports them.
+  See the new RabbitMQ docs page.
+
+- **CI runs every gated real-backend spec, and a skip fails the build.** A new
+  `integration` job runs the MySQL and PostgreSQL round-trips and the RabbitMQ
+  transport and inbox specs against service containers built from the same
+  images `compose.yaml` uses locally. Until now those specs only ran when
+  someone ran `test:full` by hand, so the claims they back — the RabbitMQ
+  return-before-ack ordering among them — were never checked on a PR. The job
+  runs them through the new `test:integration:strict`, which fails unless the
+  run is non-empty and has no `# SKIP` or `# TODO` marker: the specs skip
+  themselves when their URL is unset, and Node's summary prints `skipped 0`
+  even when a whole suite was skipped, so neither a green exit nor the summary
+  proves anything ran. `test:mutant:full` now also passes the RabbitMQ URLs,
+  so `STRYKER_WITH_INFRA=1` runs the RabbitMQ specs too.
+
 - **Both ends of the NestJS peer range are now CI legs.** The single
   `nestjs-latest-major` job that resolved the tree against `^12` is replaced
   by a `nestjs-compat` matrix: an `11 floor` leg pinned exactly to `11.0.0`

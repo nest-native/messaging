@@ -1,6 +1,6 @@
 # @nest-native/messaging
 
-<p align="center">Transactional outbox + idempotent inbox for NestJS — persisted with Drizzle ORM (SQLite, Postgres &amp; MySQL), delivered in-process or over Kafka.</p>
+<p align="center">Transactional outbox + idempotent inbox for NestJS — persisted with Drizzle ORM (SQLite, Postgres &amp; MySQL), delivered in-process, over Kafka, or over RabbitMQ.</p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@nest-native/messaging"><img src="https://img.shields.io/npm/v/@nest-native/messaging.svg" alt="NPM Version" /></a>
@@ -10,7 +10,7 @@
 </p>
 
 > [!NOTE]
-> **v0.x — early but stable.** The producer, claimer, inbox, transport seam, and the Drizzle stores are implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are supported, with in-process (no broker) and Kafka transports.
+> **v0.x — early but stable.** The producer, claimer, inbox, transport seam, and the Drizzle stores are implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are supported, with in-process (no broker), Kafka, and RabbitMQ transports.
 
 ## The problem it solves
 
@@ -21,7 +21,7 @@
 - **Transactional outbox (producer)** — `enqueue()` writes the event into an `outbox_events` row **inside your business transaction** (via [`@nestjs-cls/transactional`](https://www.npmjs.com/package/@nestjs-cls/transactional)). A background **claimer** then relays committed rows to the broker — at-least-once, with retry/backoff.
 - **Idempotent inbox (consumer)** — `runOnce()` deduplicates redeliveries via a unique `(source, message_key)` row written **in the same transaction as the side effect**, yielding **effective exactly-once** processing.
 
-It is **not** a generic multi-broker abstraction — it is the outbox/inbox pattern, done natively for the Drizzle + Kafka + NestJS stack.
+It is **not** a generic multi-broker abstraction — it is the outbox/inbox pattern, done natively for the Drizzle + NestJS stack, delivered over Kafka or RabbitMQ.
 
 ## Install
 
@@ -30,6 +30,7 @@ npm install @nest-native/messaging
 # plus your driver + transport (peer dependencies):
 npm install drizzle-orm @nestjs-cls/transactional better-sqlite3   # or pg / mysql2
 npm install @nest-native/kafka                                     # only for the Kafka transport
+npm install amqplib                                                # only for the RabbitMQ transport
 ```
 
 ## Entry points
@@ -42,6 +43,7 @@ npm install @nest-native/kafka                                     # only for th
 | `@nest-native/messaging/postgres` | node-postgres (async) stores + table factories |
 | `@nest-native/messaging/mysql` | mysql2 (async) stores + table factories |
 | `@nest-native/messaging/kafka` | `KafkaOutboxTransport` + the idempotent consumer engine, over `@nest-native/kafka` |
+| `@nest-native/messaging/rabbitmq` | `RabbitOutboxTransport` (confirm channel, `mandatory` publishes) + `RabbitInboxConsumer`, over your `amqplib` connection |
 | `@nest-native/messaging/testing` | in-memory transport for broker-free tests |
 
 ## How it fits together
@@ -141,7 +143,7 @@ whole story anyway — its processes share one machine by definition).
 ## Status & scope
 
 - **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
-- **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
+- **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and RabbitMQ (`amqplib`) — see [RabbitMQ](https://nest-native.dev/messaging/docs/rabbitmq).
 - **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; the wake tiers cut that idle wait — `OutboxWaker` in-process, the `WakeSocket` pair across processes on one machine, and Postgres `LISTEN`/`NOTIFY` across machines (see above).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 

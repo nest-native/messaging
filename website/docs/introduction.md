@@ -6,12 +6,12 @@ title: Introduction
 # @nest-native/messaging
 
 Transactional **outbox** + idempotent **inbox** for NestJS — persisted with
-Drizzle ORM (SQLite, Postgres, and MySQL), delivered in-process or over Kafka.
+Drizzle ORM (SQLite, Postgres, and MySQL), delivered in-process, over Kafka, or over RabbitMQ.
 
 :::note v0.x — early but stable
 The producer, claimer, inbox, transport seam, and the Drizzle stores are
 implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are
-supported, with in-process (no broker) and Kafka transports. This is a community
+supported, with in-process (no broker), Kafka, and RabbitMQ transports. This is a community
 project in the `nest-native` family and is **not** affiliated with the NestJS
 core team.
 :::
@@ -43,7 +43,8 @@ so the next delivery reprocesses cleanly. The result is **effective
 exactly-once** processing on top of an at-least-once broker.
 
 It is **not** a generic multi-broker abstraction — it is the outbox/inbox
-pattern, done natively for the Drizzle + Kafka + NestJS stack.
+pattern, done natively for the Drizzle + NestJS stack, delivered over Kafka or
+RabbitMQ.
 
 ## Entry points
 
@@ -55,6 +56,7 @@ pattern, done natively for the Drizzle + Kafka + NestJS stack.
 | `@nest-native/messaging/postgres` | node-postgres (asynchronous) stores + table factories |
 | `@nest-native/messaging/mysql` | mysql2 (asynchronous) stores + table factories |
 | `@nest-native/messaging/kafka` | `KafkaOutboxTransport` + the idempotent `KafkaInboxConsumer`, over `@nest-native/kafka` |
+| `@nest-native/messaging/rabbitmq` | `RabbitOutboxTransport` + `RabbitInboxConsumer`, over your `amqplib` connection — see [RabbitMQ](rabbitmq.md) |
 | `@nest-native/messaging/testing` | in-memory transport for broker-free tests |
 
 ## How it fits together
@@ -81,8 +83,8 @@ or the [API Reference](./api-reference.md) for the full surface.
   asynchronous), and MySQL (`mysql2`, asynchronous) via per-dialect stores. You
   may provide your own store.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no
-  broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`), plus
-  an in-memory one for tests.
+  broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and
+  RabbitMQ (`amqplib`), plus an in-memory one for tests.
 - **Roadmap:** additional transports.
 - **Out of scope:** CDC (Debezium) log-tailing is an intentional non-goal — this
   is the application-level outbox, written through your ORM transaction. Generic
@@ -98,6 +100,7 @@ or the [API Reference](./api-reference.md) for the full surface.
 | `@nestjs-cls/transactional` | `^3.0.0` — on NestJS 12, `3.3+` (with `nestjs-cls` `6.3+`): the first releases whose own peer ranges admit 12 |
 | `better-sqlite3` | `^11.0.0 \|\| ^12.0.0 \|\| ^13.0.0` |
 | `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
+| `amqplib` | `^2.0.0` (RabbitMQ 4, optional) |
 
 Both ends of the NestJS range are tested, not assumed: the default lockfile
 keeps the suite on an 11.x in the middle of the range, and the `nestjs-compat`

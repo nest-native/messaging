@@ -46,6 +46,11 @@
       "require": "./dist/adapters/kafka/index.js",
       "default": "./dist/adapters/kafka/index.js"
     },
+    "./rabbitmq": {
+      "types": "./dist/adapters/rabbitmq/index.d.ts",
+      "require": "./dist/adapters/rabbitmq/index.js",
+      "default": "./dist/adapters/rabbitmq/index.js"
+    },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "require": "./dist/testing/index.js",
@@ -90,6 +95,7 @@
     "@nestjs/common": "^11.0.0 || ^12.0.0",
     "@nestjs/core": "^11.0.0 || ^12.0.0",
     "@nest-native/kafka": "^0.2.0 || ^0.3.0 || ^0.4.0 || ^0.5.0",
+    "amqplib": "^2.0.0",
     "better-sqlite3": "^11.0.0 || ^12.0.0 || ^13.0.0",
     "drizzle-orm": "^0.44.0 || ^0.45.0",
     "mysql2": "^3.0.0",
@@ -99,6 +105,9 @@
   },
   "peerDependenciesMeta": {
     "@nest-native/kafka": {
+      "optional": true
+    },
+    "amqplib": {
       "optional": true
     },
     "better-sqlite3": {

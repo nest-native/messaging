@@ -1,7 +1,7 @@
 # Optional local infrastructure for the gated driver integration specs.
-# Nothing in the default `npm test` path or CI needs this — forks work
-# without Docker. See GUIDELINES_NEST_MESSAGING.md, "Local full-mode
-# verification".
+# Nothing in the default `npm test` path needs this — forks work without
+# Docker. CI's `integration` job runs the same images as service containers.
+# See GUIDELINES_NEST_MESSAGING.md, "Local full-mode verification".
 #
 #   npm run infra:up     start + wait for health
 #   npm run test:full    run the suite with the gated specs enabled
@@ -36,4 +36,19 @@ services:
       test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-pmessaging']
       interval: 2s
       timeout: 3s
+      retries: 60
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: nest-messaging-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: messaging
+      RABBITMQ_DEFAULT_PASS: messaging
+    ports:
+      - '127.0.0.1:56720:5672'
+      - '127.0.0.1:15670:15672'
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_port_connectivity']
+      interval: 2s
+      timeout: 5s
       retries: 60
