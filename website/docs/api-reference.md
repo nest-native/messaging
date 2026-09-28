@@ -450,7 +450,7 @@ interface RabbitConsumeOptions<T> {
 
 interface RabbitConsumeResult {
   outcome: 'processed' | 'duplicate' | 'dead-lettered' | 'requeued';
-  dedupKey?: string;
+  dedupKey?: string;  // on every outcome once derived; absent only when the message has no key
 }
 ```
 

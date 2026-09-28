@@ -25,6 +25,11 @@ export interface RabbitDeadLetterTarget {
  */
 export interface RabbitConsumeResult {
   outcome: 'processed' | 'duplicate' | 'dead-lettered' | 'requeued';
+  /**
+   * The message's dedup key, whenever one could be derived — on every outcome,
+   * so a dead letter or a requeue can be traced back to its event. Absent only
+   * for a message that carries no key at all (which is dead-lettered).
+   */
   dedupKey?: string;
 }
 
@@ -77,8 +82,9 @@ export class RabbitInboxConsumer {
 
   async consume<T>(options: RabbitConsumeOptions<T>): Promise<RabbitConsumeResult> {
     const { channel, message } = options;
+    let dedupKey: string | undefined;
     try {
-      const dedupKey = deriveDedupKey(
+      dedupKey = deriveDedupKey(
         message.properties.headers as Record<string, WireHeaderValue> | undefined,
         message.properties.messageId as string | undefined,
       );
@@ -86,8 +92,9 @@ export class RabbitInboxConsumer {
       if (!options.validate(payload)) {
         throw new PermanentError('payload failed validation');
       }
-      const sideEffect: InboxSideEffect = () => options.sideEffect(payload, dedupKey);
-      const outcome = await this.inbox.runOnce(dedupKey, options.source, sideEffect);
+      const key = dedupKey;
+      const sideEffect: InboxSideEffect = () => options.sideEffect(payload, key);
+      const outcome = await this.inbox.runOnce(key, options.source, sideEffect);
       if (outcome === 'duplicate') {
         this.logger.debug(`duplicate skipped: ${dedupKey}`);
       }
@@ -95,23 +102,24 @@ export class RabbitInboxConsumer {
       return { outcome, dedupKey };
     } catch (error) {
       if (actionForError(error) === 'dead-letter') {
-        return this.deadLetter(options, error as PermanentError);
+        return this.deadLetter(options, error as PermanentError, dedupKey);
       }
       this.logger.warn(`requeued for redelivery: ${describe(error)}`);
       channel.nack(message, false, true);
-      return { outcome: 'requeued' };
+      return result('requeued', dedupKey);
     }
   }
 
   private async deadLetter<T>(
     options: RabbitConsumeOptions<T>,
     error: PermanentError,
+    dedupKey: string | undefined,
   ): Promise<RabbitConsumeResult> {
     const { channel, message, deadLetter } = options;
     if (!deadLetter) {
       this.logger.warn(`rejected without requeue: ${error.message}`);
       channel.nack(message, false, false);
-      return { outcome: 'dead-lettered' };
+      return result('dead-lettered', dedupKey);
     }
     try {
       await publishConfirmed(deadLetter, message, error.message);
@@ -122,12 +130,19 @@ export class RabbitInboxConsumer {
         `could not dead-letter (${describe(publishError)}); requeued: ${error.message}`,
       );
       channel.nack(message, false, true);
-      return { outcome: 'requeued' };
+      return result('requeued', dedupKey);
     }
     this.logger.warn(`dead-lettered to ${deadLetter.exchange}: ${error.message}`);
     channel.ack(message);
-    return { outcome: 'dead-lettered' };
+    return result('dead-lettered', dedupKey);
   }
+}
+
+function result(
+  outcome: RabbitConsumeResult['outcome'],
+  dedupKey: string | undefined,
+): RabbitConsumeResult {
+  return dedupKey === undefined ? { outcome } : { outcome, dedupKey };
 }
 
 function decodePayload(message: ConsumeMessage): unknown {

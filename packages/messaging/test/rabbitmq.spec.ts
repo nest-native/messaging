@@ -401,12 +401,12 @@ describe('RabbitInboxConsumer', () => {
     assert.equal(result.dedupKey, 'amqp-id');
   });
 
-  const poison: [string, ConsumeMessage, RegExp][] = [
-    ['no dedup key at all', delivery('{"orderId":1}'), /cannot deduplicate/],
-    ['a body that is not JSON', delivery('not json', { messageId: 'm' }), /not valid JSON/],
-    ['a payload validate rejects', delivery('{"nope":1}', { messageId: 'm' }), /failed validation/],
+  const poison: [string, ConsumeMessage, RegExp, string | undefined][] = [
+    ['no dedup key at all', delivery('{"orderId":1}'), /cannot deduplicate/, undefined],
+    ['a body that is not JSON', delivery('not json', { messageId: 'm' }), /not valid JSON/, 'm'],
+    ['a payload validate rejects', delivery('{"nope":1}', { messageId: 'm' }), /failed validation/, 'm'],
   ];
-  for (const [label, message, reason] of poison) {
+  for (const [label, message, reason, dedupKey] of poison) {
     test(`rejects ${label} without requeue when no dead-letter target is given`, async () => {
       const consumer = new RabbitInboxConsumer(runs('processed'));
       const { channel, settled } = deliveryChannel();
@@ -417,7 +417,12 @@ describe('RabbitInboxConsumer', () => {
         validate,
         sideEffect: () => assert.fail('must not run'),
       });
-      assert.deepEqual(result, { outcome: 'dead-lettered' });
+      // The key travels with the result whenever one could be derived, so a
+      // dead letter can be traced to its event.
+      assert.deepEqual(
+        result,
+        dedupKey === undefined ? { outcome: 'dead-lettered' } : { outcome: 'dead-lettered', dedupKey },
+      );
       assert.deepEqual(settled, [{ kind: 'nack', requeue: false }]);
       assert.ok(logs.some((l) => l.level === 'warn' && reason.test(String(l.message))));
     });
@@ -446,7 +451,7 @@ describe('RabbitInboxConsumer', () => {
         routingKey: 'orders.dead',
       },
     });
-    assert.deepEqual(result, { outcome: 'dead-lettered' });
+    assert.deepEqual(result, { outcome: 'dead-lettered', dedupKey: 'evt-5' });
     assert.deepEqual(settled, [{ kind: 'ack' }]);
     const [republished] = dlq.published;
     assert.equal(republished?.exchange, 'dlx');
@@ -478,7 +483,7 @@ describe('RabbitInboxConsumer', () => {
         routingKey: 'dead',
       },
     });
-    assert.deepEqual(result, { outcome: 'requeued' });
+    assert.deepEqual(result, { outcome: 'requeued', dedupKey: 'm' });
     assert.deepEqual(settled, [{ kind: 'nack', requeue: true }]);
     assert.ok(logs.some((l) => String(l.message).includes('could not dead-letter (nacked by broker)')));
   });
@@ -497,7 +502,7 @@ describe('RabbitInboxConsumer', () => {
       validate,
       sideEffect: () => undefined,
     });
-    assert.deepEqual(result, { outcome: 'requeued' });
+    assert.deepEqual(result, { outcome: 'requeued', dedupKey: 'm' });
     assert.deepEqual(settled, [{ kind: 'nack', requeue: true }]);
     assert.ok(logs.some((l) => String(l.message).includes('database is locked')));
   });
