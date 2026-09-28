@@ -141,7 +141,12 @@ has already put the delivery back; the consumer logs that and returns the
 outcome, and the redelivery is deduplicated if the work was done.
 
 ```ts
-import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
+import {
+  type BeforeApplicationShutdown,
+  Inject,
+  Injectable,
+  type OnApplicationBootstrap,
+} from '@nestjs/common';
 import { RabbitInboxConsumer } from '@nest-native/messaging/rabbitmq';
 import type { RecoveringChannelModel } from 'amqplib';
 
@@ -150,28 +155,41 @@ const isOrderPlaced = (p: unknown): p is OrderPlaced =>
   typeof p === 'object' && p !== null && typeof (p as OrderPlaced).orderId === 'string';
 
 @Injectable()
-export class OrderAuditConsumer implements OnApplicationBootstrap {
+export class OrderAuditConsumer implements OnApplicationBootstrap, BeforeApplicationShutdown {
+  private stopped = false;
+  private retry?: NodeJS.Timeout;
+
   constructor(
     @Inject(RABBITMQ) private readonly rabbit: RecoveringChannelModel,
     private readonly inbox: RabbitInboxConsumer,
     private readonly audit: AuditRepository,
   ) {}
 
-  async onApplicationBootstrap(): Promise<void> {
-    await this.subscribe();
-    // Channels do not survive a reconnect; subscribe again on each new
-    // connection. (The first 'connect' fired before bootstrap.)
-    this.rabbit.on('connect', () => void this.subscribe());
+  onApplicationBootstrap(): Promise<void> {
+    return this.subscribe();
+  }
+
+  // Before the connection closes, so its channel closing is not taken for a failure.
+  beforeApplicationShutdown(): void {
+    this.stopped = true;
+    clearTimeout(this.retry);
   }
 
   private async subscribe(): Promise<void> {
     const channel = await this.rabbit.createChannel();
-    // A channel the broker closes emits 'error' first; without a listener the
-    // process would crash. The next reconnect subscribes again.
+    // The broker's reason for closing a channel arrives as 'error'; without a
+    // listener the process would crash.
     channel.on('error', (error) => console.warn(`orders.audit channel: ${error.message}`));
+    // A dropped connection, a channel the broker closed, a cancelled consumer:
+    // each ends with the channel closing, so subscribe again on a new one.
+    // createChannel() waits while the connection is recovering.
+    channel.once('close', () => this.resubscribe());
     await channel.prefetch(10);
     await channel.consume('orders.audit', (message) => {
-      if (!message) return;
+      if (!message) {
+        void channel.close().catch(() => undefined); // consumer cancelled: start over
+        return;
+      }
       void this.inbox.consume({
         source: 'orders.audit',
         channel,
@@ -181,8 +199,24 @@ export class OrderAuditConsumer implements OnApplicationBootstrap {
       });
     });
   }
+
+  private resubscribe(): void {
+    if (this.stopped || this.retry) return;
+    // A pause, so a queue that is gone does not become a hot loop.
+    this.retry = setTimeout(() => {
+      this.retry = undefined;
+      if (!this.stopped) this.subscribe().catch(() => this.resubscribe());
+    }, 1_000);
+  }
 }
 ```
+
+The two RabbitMQ samples run this loop against a real broker and drop its
+connection from the broker side to prove it: the consumers subscribe again on
+their own. Channels do not survive a reconnect, and subscribing again only on
+the connection's `connect` event is not enough — a channel the broker closes
+on its own (an ack timeout, an access error) or a cancelled consumer leaves the
+connection up, and the consumer would stop without a trace.
 
 Register `RabbitInboxConsumer` as a provider next to your consumer. On the
 SQLite inbox store the side effect must be synchronous and database-only; on

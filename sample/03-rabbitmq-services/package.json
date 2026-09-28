@@ -1,0 +1,30 @@
+{
+  "name": "nest-native-messaging-sample-03-rabbitmq-services",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Two services choreographed over RabbitMQ — orders and shipping, each with its own database, outbox relay and idempotent inbox; shipping consumes and publishes in one transaction, survives an outage, and never schedules an order twice",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke": "ts-node --transpile-only scripts/smoke.ts",
+    "test": "npm run typecheck && npm run smoke"
+  },
+  "dependencies": {
+    "@nest-native/messaging": "0.6.0",
+    "@nestjs-cls/transactional": "^3.2.1",
+    "@nestjs-cls/transactional-adapter-drizzle-orm": "^1.3.0",
+    "@nestjs/common": "^11.1.28",
+    "@nestjs/core": "^11.1.28",
+    "amqplib": "^2.0.1",
+    "better-sqlite3": "^12.11.1",
+    "drizzle-orm": "^0.45.2",
+    "nestjs-cls": "^6.2.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.6.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

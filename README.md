@@ -71,8 +71,8 @@ CI matrix resolves the tree against each end in every workspace — `11.0.0`
 pinned exactly (nothing this package uses was added by a later 11.x), and
 `^12` — proves every workspace resolves exactly that and every peer range in
 the NestJS ecosystem is satisfied, and reruns the suite, the package build, and
-both samples. NestJS 11 runs on any Node.js `>=22`. NestJS 12 is ESM-only;
-loading it from CommonJS (this package, and both samples) goes through Node's
+every sample (the RabbitMQ ones against a real broker). NestJS 11 runs on any Node.js `>=22`. NestJS 12 is ESM-only;
+loading it from CommonJS (this package, and every sample) goes through Node's
 `require(esm)`, which is behind a flag before Node.js 22.12.0, so the 12 end of
 the range needs Node.js `>=22.12` — a current Node 22, or 24. `engines` stays
 `>=22` because the 11 end does not need more; Node 22.0–22.11 satisfies it and

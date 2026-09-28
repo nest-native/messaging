@@ -41,6 +41,27 @@ package release is useful for users.
   both adapters and exported from `/rabbitmq` as well as `/kafka`.
   See the new RabbitMQ docs page.
 
+- **Two RabbitMQ samples.** `sample/02-rabbitmq` runs the outbox and the
+  inbox against a real broker and asserts every path the adapter promises: a
+  confirmed publish, a redelivered duplicate acked without a second side
+  effect, poison dead-lettered with its reason, and an unroutable event kept in
+  the outbox instead of acked into the void. `sample/03-rabbitmq-services` is
+  two services — orders and shipping, each its own process and database —
+  choreographed over one broker: shipping consumes `order.placed` and publishes
+  `shipment.scheduled` in one transaction, keeps working through an outage from
+  the backlog RabbitMQ held for it, and books nothing twice when an event
+  arrives again. In both, the broker then drops the connections, and the
+  services reconnect and subscribe again on their own: each consumer subscribes
+  again whenever its channel closes, which also covers a channel the broker
+  closes on its own and a cancelled consumer — subscribing again only on the
+  connection's `connect` event misses both. The RabbitMQ docs page now shows
+  that loop. Both samples run in CI against a RabbitMQ service container, in the
+  sample job and in both NestJS compatibility legs, and fail rather than skip
+  there when no broker or management API is provided. Sample 03 also records why each service
+  needs its own process: `@nestjs-cls/transactional` keeps its transaction host
+  in process-global state, so two applications in one process share one
+  database's transactions.
+
 - **CI runs every gated real-backend spec, and a skip fails the build.** A new
   `integration` job runs the MySQL and PostgreSQL round-trips and the RabbitMQ
   transport and inbox specs against service containers built from the same
