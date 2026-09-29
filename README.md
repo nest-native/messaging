@@ -62,7 +62,7 @@ npm install amqplib                                                # only for th
 | Drizzle ORM | `^0.44.0 \|\| ^0.45.0` |
 | `@nestjs-cls/transactional` | `^3.0.0` — on NestJS 12, `3.3+` (with `nestjs-cls` `6.3+`): the first releases whose own peer ranges admit 12 |
 | `better-sqlite3` | `^11.0.0 \|\| ^12.0.0 \|\| ^13.0.0` |
-| `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
+| `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0 \|\| ^0.6.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
 | `amqplib` | `^2.0.0` (RabbitMQ 4, optional) |
 
 Both ends of the NestJS range are tested, not assumed: the default lockfile

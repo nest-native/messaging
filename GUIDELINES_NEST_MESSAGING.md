@@ -84,7 +84,8 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   that warning is not a gate either, because npm also prints it for
   transitional states that end coherent. The neighbours whose own peer ranges
   gate 12 — `nestjs-cls` 6.3, `@nestjs-cls/transactional` 3.3 (6.2 / 3.2 say
-  `< 12`) and `@nest-native/kafka` 0.5.1 — are the devDependency floors, so a
+  `< 12`) and `@nest-native/kafka` 0.6.0 (0.5.1 was the first to admit 12) —
+  are the devDependency floors, so a
   fresh resolve picks them up without naming them; a peer that does not admit
   an end is a real finding, never hidden with `--legacy-peer-deps`, and the
   leg is red until the peer ships. Dependabot cannot deliver a NestJS major:
