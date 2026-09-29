@@ -84,7 +84,8 @@ export class PostgresOutboxStore implements OutboxStore {
             ),
           ),
         )
-        .limit(cfg.batchSize);
+        .limit(cfg.batchSize)
+        .for('update', { skipLocked: true });
       // Stryker disable next-line ConditionalExpression: query-saving early return — skipping it is behaviourally identical (inArray([]) matches nothing)
       if (candidates.length === 0) return [];
       const ids = candidates.map((c) => c.id);
@@ -96,18 +97,19 @@ export class PostgresOutboxStore implements OutboxStore {
     });
   }
 
-  async markCompleted(db: unknown, id: string): Promise<void> {
+  async markCompleted(db: unknown, id: string, claimedBy: string): Promise<void> {
     await (db as Db)
       .update(outboxEvents)
       .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
-      .where(eq(outboxEvents.id, id));
+      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
   }
 
   async retry(
     db: unknown,
     id: string,
     delayMs: number,
-    lastError?: string,
+    lastError: string | undefined,
+    claimedBy: string,
   ): Promise<void> {
     const nextAvailable = new Date(Date.now() + delayMs).toISOString();
     await (db as Db)
@@ -120,10 +122,10 @@ export class PostgresOutboxStore implements OutboxStore {
         claimedBy: null,
         lastError: lastError ?? null,
       })
-      .where(eq(outboxEvents.id, id));
+      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
   }
 
-  async markFailed(db: unknown, id: string, reason: string): Promise<void> {
+  async markFailed(db: unknown, id: string, reason: string, claimedBy: string): Promise<void> {
     await (db as Db)
       .update(outboxEvents)
       .set({
@@ -132,6 +134,6 @@ export class PostgresOutboxStore implements OutboxStore {
         lastError: reason,
         processedAt: new Date().toISOString(),
       })
-      .where(eq(outboxEvents.id, id));
+      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
   }
 }

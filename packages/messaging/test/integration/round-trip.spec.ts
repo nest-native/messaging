@@ -112,7 +112,7 @@ describe('MySQL round-trip (real service)', { skip: !MYSQL_URL }, () => {
     assert.equal(claimed.length, 3);
     assert.ok(claimed.every((row) => row.status === 'processing'));
 
-    await outbox.markCompleted(db, enqueued.id);
+    await outbox.markCompleted(db, enqueued.id, cfg.workerInstanceId);
     const [completed] = await db
       .select()
       .from(mysqlOutboxEvents)
@@ -184,7 +184,7 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
     const claimed = await outbox.claimBatch(db, cfg);
     assert.equal(claimed.length, 1);
     assert.equal(claimed[0]?.status, 'processing');
-    await outbox.markCompleted(db, enqueued.id);
+    await outbox.markCompleted(db, enqueued.id, cfg.workerInstanceId);
     const [completed] = await db
       .select()
       .from(pgOutboxEvents)
@@ -201,6 +201,37 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
     const seen = await pool.query('SELECT count(*)::int AS c FROM integration_side_effects WHERE dedup_key = $1', [key]);
     assert.equal((seen.rows as { c: number }[])[0].c, 1);
     void pgInboxEvents;
+  });
+
+  test('concurrent claimers do not claim the same events (skip locked)', async () => {
+    // 1. Insert multiple pending events
+    const ids = Array.from({ length: 10 }, (_, i) => `c-${i}`);
+    for (const id of ids) {
+      await outbox.enqueue(db, {
+        topic: 'concurrent.test',
+        payload: { id },
+        idempotencyKey: `concurrent:${id}`,
+      });
+    }
+
+    // 2. Configure two claimers
+    const cfg1 = { ...cfg, workerInstanceId: 'worker-A' };
+    const cfg2 = { ...cfg, workerInstanceId: 'worker-B' };
+
+    // 3. Claim concurrently
+    const [claimedByA, claimedByB] = await Promise.all([
+      outbox.claimBatch(db, cfg1),
+      outbox.claimBatch(db, cfg2),
+    ]);
+
+    // 4. Verify disjoint sets and total claims
+    const totalClaimed = claimedByA.length + claimedByB.length;
+    assert.equal(totalClaimed, 10, 'All 10 events should be claimed between the two workers');
+
+    const idsA = claimedByA.map((r) => r.id);
+    const idsB = claimedByB.map((r) => r.id);
+    const overlap = idsA.filter((id) => idsB.includes(id));
+    assert.equal(overlap.length, 0, 'Workers must not claim the same events');
   });
 
   test('LISTEN/NOTIFY wake: delivered on commit, dropped on rollback', async () => {

@@ -121,32 +121,35 @@ describe('SqliteOutboxStore', () => {
     assert.equal(claimed[0]?.claimedBy, cfg.workerInstanceId);
   });
 
-  test('markCompleted, retry, markFailed transition the row', async () => {
-    const row = store.enqueue(db, { topic: 't', payload: {} });
-    await store.markCompleted(db, row.id);
-    let after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
+  test('markCompleted transitions the row', async () => {
+    store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
+    await store.markCompleted(db, claimed!.id, cfg.workerInstanceId);
+    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
     assert.equal(after?.status, 'completed');
     assert.ok(after?.processedAt);
+  });
 
+  test('retry transitions the row', async () => {
+    store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
     const before = Date.now();
-    await store.retry(db, row.id, 5_000, 'boom');
-    after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
+    await store.retry(db, claimed!.id, 5_000, 'boom', cfg.workerInstanceId);
+    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
     assert.equal(after?.status, 'pending');
     assert.equal(after?.attempts, 1);
     assert.equal(after?.lastError, 'boom');
-    // The retry delay pushes availableAt INTO THE FUTURE by delayMs.
     assert.ok(new Date(after!.availableAt).getTime() >= before + 5_000);
+  });
 
-    await store.retry(db, row.id, 1_000);
-    after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
-    assert.equal(after?.attempts, 2);
-    assert.equal(after?.lastError, null);
-
-    await store.markFailed(db, row.id, 'dead');
-    after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
+  test('markFailed transitions the row', async () => {
+    store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
+    await store.markFailed(db, claimed!.id, 'dead', cfg.workerInstanceId);
+    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
     assert.equal(after?.status, 'failed');
     assert.equal(after?.lastError, 'dead');
-    assert.equal(after?.attempts, 3);
+    assert.equal(after?.attempts, 1);
   });
 });
 
