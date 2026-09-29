@@ -250,17 +250,25 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   surface — `audit-production-surface.mjs` packs the tarball and audits its
   production closure. Since the package publishes `"dependencies": {}`, this is
   exactly what consumers install. Advisories confined to dev/peer/build tooling or
-  the docs `website/` are tracked by Dependabot but do not block releases.
+  the docs `website/` do not block releases.
 - **The docs audit reports, it does not gate.** `security:audit` hard-fails only
   on the *published* surface; `security:audit:docs` still runs and prints, but
   cannot fail the build. This makes the gate match the rule above — website
   advisories cannot reach consumers, so they must not block every PR in the
   repo. Precedent: `@nest-native/cache` and `@nest-native/trpc` were already
   package-only. Trigger: `image-size` (GHSA-w3rx-r6r6-pgpr,
-  GHSA-5p2g-fcmc-qvqq) has NO patched version — 2.0.2 is both the latest
-  release and vulnerable — and arrives through `@docusaurus/mdx-loader`, so the
-  gate was unfixable by any dependency change. Dependabot still tracks the
-  website tree; fix docs advisories when a fix exists.
+  GHSA-5p2g-fcmc-qvqq) had NO patched version then — 2.0.2 was both the latest
+  release and vulnerable (2.0.4 has since fixed it) — and arrives through
+  `@docusaurus/mdx-loader`, so the gate was unfixable by any dependency change.
+- **Fix docs advisories when a fix exists, and do not wait for Dependabot to
+  report them.** The `/website` entry in `.github/dependabot.yml` brings
+  version updates, yet an audit on 2026-09-29 found 29 advisories (5 high)
+  that no Dependabot alert or PR had surfaced; `npm --prefix website audit` is
+  the check. `audit fix` cleared 12, all five highs among them. The other 17
+  were one advisory, `uuid` < 11.1.1 under `sockjs` (the dev server only),
+  which `website/package.json` overrides to `^11.1.1`: `sockjs` calls only
+  `require('uuid').v4()`, which 11.x keeps in CommonJS. Drop the override once
+  Docusaurus's own chain moves past it.
 
 - **Strictness scope.** The non-negotiables (100% coverage, complexity ≤ 15, zero
   published runtime deps, isolated major-version review) govern the *core* package
