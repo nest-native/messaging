@@ -8,6 +8,18 @@ package release is useful for users.
 
 ## Unreleased
 
+- **`@nest-native/kafka` 0.6.x is now an allowed peer**
+  (`^0.2.0 || ^0.3.0 || ^0.4.0 || ^0.5.0 || ^0.6.0`). Under 0.x caret rules
+  the range excluded 0.6.0, so an application installing this package next to
+  Kafka 0.6.0 failed with `ERESOLVE` — the same blocker the 0.5.2 widening
+  removed for 0.4 and 0.5. Kafka 0.6.0's changes do not touch the surfaces
+  this package uses (`KafkaProducerService.send`, the consumer decorators,
+  `KafkaContext`): a retried message now backs off (the partition pauses, 1 s
+  doubling to 30 s) instead of redelivering at once, subscriptions may name
+  topics by `RegExp`, and an error mapper may be async. Verified rather than
+  assumed: the suite, the 100% coverage gate, the complexity gate and every
+  sample run green with the devDependency and `sample/01-kafka` on 0.6.0.
+
 - **Both ends of the NestJS peer range are now CI legs.** The single
   `nestjs-latest-major` job that resolved the tree against `^12` is replaced
   by a `nestjs-compat` matrix: an `11 floor` leg pinned exactly to `11.0.0`
