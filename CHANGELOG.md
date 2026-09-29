@@ -8,6 +8,8 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.7.0 - 2026-09-29
+
 - **RabbitMQ transport: `@nest-native/messaging/rabbitmq`.** A
   `RabbitOutboxTransport` that relays the outbox over RabbitMQ and a
   `RabbitInboxConsumer` that runs the idempotent inbox on RabbitMQ deliveries,
