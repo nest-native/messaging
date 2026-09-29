@@ -436,29 +436,42 @@ Injectable. Call `consume` from your `channel.consume` callback (manual acks).
 
 ```ts
 class RabbitInboxConsumer {
-  consume<T>(options: RabbitConsumeOptions<T>): Promise<RabbitConsumeResult>;
+  consume<T>(options: RabbitConsumeOptions<T>): Promise<RabbitConsumeResult>; // never rejects
 }
 
 interface RabbitConsumeOptions<T> {
   source: string;                                  // scopes dedup keys (e.g. the queue)
   channel: Channel;                                // ack/nack go here
   message: ConsumeMessage;
-  validate: (payload: unknown) => payload is T;    // failure -> dead-letter
+  validate: (payload: unknown) => payload is T;    // false or a throw -> dead-letter
   sideEffect: (payload: T, dedupKey: string) => void | Promise<void>;
   deadLetter?: { channel: ConfirmChannel; exchange: string; routingKey: string };
+  retry?: RabbitRetryOptions;
+}
+
+interface RabbitRetryOptions {
+  delayMs?: number;      // wait before the first requeue; doubles per failed attempt. Default 1000
+  maxDelayMs?: number;   // cap on that wait. Default 30000
+  maxAttempts?: number;  // dead-letter after this many failures (per process). Default: never
 }
 
 interface RabbitConsumeResult {
   outcome: 'processed' | 'duplicate' | 'dead-lettered' | 'requeued';
   dedupKey?: string;  // on every outcome once derived; absent only when the message has no key
 }
+
+const X_DEAD_LETTER_ID = 'x-dead-letter-id'; // matches a returned dead-letter copy to its publish
 ```
 
 Processed and duplicate deliveries are acked. A `PermanentError` (no dedup key,
-a body that is not JSON, or a payload `validate` rejects) is republished to
-`deadLetter` with an `x-error` header and acked — or requeued if that publish
-fails — or, with no `deadLetter`, rejected without requeue. Any other error is
-`nack`ed with requeue.
+a body that is not JSON, a payload `validate` rejects or throws on) is
+republished to `deadLetter` — `mandatory`, with an `x-error` header — and the
+original acked once the broker confirms the copy; if the copy fails or comes
+back unroutable, the original is requeued instead. With no `deadLetter` it is
+rejected without requeue. Any other error is `nack`ed with requeue after a
+backoff, or dead-lettered once `retry.maxAttempts` is reached. A channel that
+closed before the delivery could be settled is logged, not thrown: the broker
+redelivers the delivery.
 
 `deriveDedupKey`, `actionForOutcome`, `actionForError` and `ConsumerAction` are
 the same helpers `/kafka` exports.

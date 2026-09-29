@@ -147,12 +147,29 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   RabbitMQ transport publishes `mandatory` on a confirm channel: without
   `mandatory`, RabbitMQ acks a message no queue is bound for and drops it, and
   the outbox row would be marked processed for an event nobody receives. The
-  broker sends the return before the ack of the same publish — verified
-  against a real RabbitMQ 4 broker by the gated spec (CI's `integration` job
-  runs it on every PR), which is the only evidence for that ordering; do not
-  change the return/ack bookkeeping without it staying green. amqplib's recovering connection survives a broker restart but
-  its channels do not, which is why the transport reopens its channel lazily
-  and bounds every publish with `confirmTimeoutMs`.
+  broker sends the return before the ack of the same publish — RabbitMQ
+  documents that ordering for publisher confirms, and the gated spec (CI's
+  `integration` job runs it on every PR) checks it against a real RabbitMQ 4
+  broker, because the bookkeeping is only correct while it holds; do not
+  change the return/ack bookkeeping without that spec staying green. amqplib's
+  recovering connection survives a broker restart but its channels do not,
+  which is why the transport reopens its channel lazily and bounds every
+  publish with `confirmTimeoutMs`.
+- **RabbitMQ consumer: settle safely, back off, and never lose a dead letter.**
+  Three rules came out of the adversarial review of the first cut, each
+  measured on RabbitMQ 4 and pinned by a gated spec. `RabbitInboxConsumer.consume`
+  never rejects: amqplib throws from `ack`/`nack` once the channel has closed,
+  and a rejection from a `void`-called consume would crash the process, so a
+  settle that fails is logged and the broker's own redelivery (deduplicated) is
+  the recovery. A transient failure is requeued only after a backoff (1 s,
+  doubling to 30 s, per message; optional `maxAttempts` dead-letters it): an
+  explicit requeue goes back to the head of the queue and is **not** counted
+  toward a quorum queue's delivery limit, so an immediate requeue redelivered
+  the same message about 1 400 times a second, forever. And a dead-letter copy
+  is published `mandatory` like the outbox's own publishes — otherwise an
+  unbound dead-letter exchange acks the copy and drops it, and the original,
+  acked next, is lost. Do not reintroduce an immediate requeue, an unguarded
+  settle, or a non-mandatory dead-letter publish.
 - **NestJS 12 is ESM-only: never import a directory index from `@nestjs/*`.**
   `@nestjs/common` and `@nestjs/core` 12 ship an exports map of
   `{".", "./internal", "./*.js", "./*": "./*.js"}`. A deep import of a *file*

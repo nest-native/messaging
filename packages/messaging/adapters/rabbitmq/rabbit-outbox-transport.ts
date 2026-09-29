@@ -32,6 +32,12 @@ export interface RabbitOutboxTransportOptions {
 
 const DEFAULT_CONFIRM_TIMEOUT_MS = 10_000;
 
+/** The transport's channel, and why the broker closed it (once it did). */
+interface OpenChannel {
+  channel: ConfirmChannel;
+  closeReason?: string;
+}
+
 /**
  * The RabbitMQ {@link OutboxTransport}: publishes a claimed outbox event to an
  * exchange on a confirm channel and resolves only when the broker has taken
@@ -51,13 +57,23 @@ const DEFAULT_CONFIRM_TIMEOUT_MS = 10_000;
  * gets. That includes an unroutable event: the usual cause is a consumer that
  * has not declared its queue yet, which a retry fixes, while a routing mistake
  * that never gets fixed still ends in a failed row instead of retrying forever.
+ * When the broker closed the channel, the failure carries its reason (a
+ * missing exchange, an access error, an oversized message).
+ *
+ * A failed attempt is not proof the event was not delivered: a publish that
+ * times out waiting for its confirm may still have reached the queue, and the
+ * retry sends it again. Delivery is at-least-once, which is what the inbox
+ * deduplicates.
  *
  * The value is JSON (`application/json`), the message is persistent, and the
  * wire contract matches the Kafka transport: `messageId` and `x-event-id` carry
  * the outbox row id, `x-idempotency-key` the business key (or the id).
  */
 export class RabbitOutboxTransport implements OutboxTransport {
-  private channel: Promise<ConfirmChannel> | undefined;
+  /** The channel being opened, or open — what the next publish uses. */
+  private channel: Promise<OpenChannel> | undefined;
+  /** The same channel once it has opened, for a `close()` that must not wait. */
+  private open: OpenChannel | undefined;
   private readonly returned = new Set<string>();
   private readonly confirmTimeoutMs: number;
 
@@ -66,10 +82,10 @@ export class RabbitOutboxTransport implements OutboxTransport {
   }
 
   async publish(message: OutboxMessage): Promise<void> {
-    const channel = await this.withTimeout(this.openChannel(), 'waiting for a confirm channel');
+    const state = await this.withTimeout(this.openChannel(), 'waiting for a confirm channel');
     const routingKey = `${this.options.routingKeyPrefix ?? ''}${message.topic}`;
     const confirmed = new Promise<void>((resolve, reject) => {
-      channel.publish(
+      state.channel.publish(
         this.options.exchange,
         routingKey,
         Buffer.from(encodeWireValue(message.payload)),
@@ -88,7 +104,8 @@ export class RabbitOutboxTransport implements OutboxTransport {
           // the time this callback runs the return handler has already fired.
           const wasReturned = this.returned.delete(message.id);
           if (error) {
-            reject(new Error(`broker did not confirm event ${message.id}: ${describe(error)}`));
+            const why = state.closeReason ? ` (${state.closeReason})` : '';
+            reject(new Error(`broker did not confirm event ${message.id}: ${describe(error)}${why}`));
           } else if (wasReturned) {
             reject(
               new Error(
@@ -109,42 +126,80 @@ export class RabbitOutboxTransport implements OutboxTransport {
     }
   }
 
-  /** Closes the transport's channel. The connection stays open; it is not ours. */
+  /**
+   * Closes the transport's channel; the connection stays open — it is not ours.
+   *
+   * An open channel is closed only after its outstanding confirms arrive
+   * (bounded by `confirmTimeoutMs`): amqplib ignores acks that arrive after it
+   * asks the broker to close the channel, so closing mid-publish would fail
+   * publishes the broker already took, and the claimer would send them again.
+   * A channel still opening is not waited for — on a recovering connection that
+   * can take the whole outage — and is closed as soon as it opens.
+   */
   async close(): Promise<void> {
     const pending = this.channel;
+    const open = this.open;
     this.channel = undefined;
-    if (!pending) return;
-    const channel = await pending.catch(() => undefined);
-    await channel?.close().catch(() => undefined);
+    this.open = undefined;
+    if (open) {
+      await this.withTimeout(open.channel.waitForConfirms(), 'draining confirms before closing').catch(
+        () => undefined,
+      );
+      await open.channel.close().catch(() => undefined);
+      return;
+    }
+    void pending?.then(
+      (state) => state.channel.close().catch(() => undefined),
+      () => undefined,
+    );
   }
 
   // One channel per transport, opened on first use and dropped when it closes
   // or errors, so the next publish opens a fresh one. With amqplib's recovering
   // connection that is what survives a broker restart: the connection comes
-  // back on its own, channels do not.
-  private openChannel(): Promise<ConfirmChannel> {
-    this.channel ??= this.options.connection.createConfirmChannel().then(
+  // back on its own, channels do not. Each callback compares against the very
+  // promise it belongs to, so a channel that closes (or fails to open) after
+  // close() or a newer open can never clear the current one.
+  private openChannel(): Promise<OpenChannel> {
+    if (this.channel) {
+      return this.channel;
+    }
+    const opening: Promise<OpenChannel> = this.options.connection.createConfirmChannel().then(
       (channel) => {
-        const opened = this.channel;
-        const forget = () => {
-          if (this.channel === opened) this.channel = undefined;
+        const state: OpenChannel = { channel };
+        const forget = (): void => {
+          if (this.channel === opening) {
+            this.channel = undefined;
+            this.open = undefined;
+          }
         };
         channel.on('return', (returned: Message) => {
           const id = returned.properties.messageId as string | undefined;
           if (id) this.returned.add(id);
         });
+        // The broker's reason arrives as 'error' before amqplib fails the
+        // unconfirmed publishes with a bare "channel closed"; keep it for them.
+        // The listener also keeps an error from reaching EventEmitter's
+        // unhandled-'error' throw.
+        channel.on('error', (error: unknown) => {
+          state.closeReason = describe(error);
+          forget();
+        });
         channel.on('close', forget);
-        // A channel error is always followed by 'close'; the listener exists so
-        // an error never reaches EventEmitter's unhandled-'error' throw.
-        channel.on('error', forget);
-        return channel;
+        if (this.channel === opening) {
+          this.open = state;
+        }
+        return state;
       },
       (error: unknown) => {
-        this.channel = undefined;
+        if (this.channel === opening) {
+          this.channel = undefined;
+        }
         throw new Error(`could not open a RabbitMQ confirm channel: ${describe(error)}`);
       },
     );
-    return this.channel;
+    this.channel = opening;
+    return opening;
   }
 
   private async withTimeout<T>(work: Promise<T>, what: string): Promise<T> {

@@ -20,9 +20,21 @@ package release is useful for users.
   consumer acks processed and duplicate deliveries, requeues transient
   failures, and dead-letters poison either by republishing it with an
   `x-error` header or by rejecting it into the queue's own dead-letter
-  exchange. Verified against a real RabbitMQ 4 broker by a new gated spec,
-  which CI runs on every PR (below). The broker-neutral consumer helpers (`deriveDedupKey`,
-  `actionForError`, …) moved to the package root; `/kafka` still exports them.
+  exchange. The consumer never rejects (a channel that closed before the ack
+  leaves the delivery with the broker, which redelivers it), requeues a
+  transient failure only after a backoff (1 s doubling to 30 s per message,
+  with an optional `maxAttempts` that dead-letters it — RabbitMQ 4 does not
+  count an explicit requeue toward a quorum queue's delivery limit, and an
+  immediate requeue spun at about 1 400 redeliveries a second), publishes its
+  dead-letter copies `mandatory` so an unbound dead-letter exchange cannot
+  swallow one, treats a `validate` that throws as poison, reads numeric AMQP
+  header values as keys, and reports the dedup key on every outcome. The
+  transport carries the broker's reason when it closes the channel, drains
+  outstanding confirms before `close()`, and never waits in `close()` for a
+  channel that is still opening. Verified against a real RabbitMQ 4 broker by
+  a new gated spec, which CI runs on every PR (below). The broker-neutral
+  consumer helpers (`deriveDedupKey`, `actionForError`, …) are now shared by
+  both adapters and exported from `/rabbitmq` as well as `/kafka`.
   See the new RabbitMQ docs page.
 
 - **CI runs every gated real-backend spec, and a skip fails the build.** A new

@@ -14,14 +14,14 @@ import {
 } from '../../adapters/rabbitmq';
 import { SqliteInboxStore } from '../../dialects/sqlite';
 import type { InboxService } from '../../inbox.service';
-import { X_ERROR } from '../../wire-contract';
+import { X_ERROR, X_EVENT_ID } from '../../wire-contract';
 
 // Gated end-to-end tests against a REAL RabbitMQ broker. They skip unless
-// MESSAGING_RABBITMQ_URL is set, so `npm test` / `test:cov` stay hermetic. Run
-// them locally via `npm run infra:up && npm run test:full` (the "Local full-mode
-// verification" section in GUIDELINES_NEST_MESSAGING.md); CI does not run them.
-// The connection-kill case additionally needs MESSAGING_RABBITMQ_MANAGEMENT_URL
-// (the management API, with credentials), which `test:full` also sets.
+// MESSAGING_RABBITMQ_URL is set, so `npm test` / `test:cov` stay hermetic. CI's
+// `integration` job runs them through `test:integration:strict`, which fails if
+// any of them skipped; locally, `npm run infra:up && npm run test:full`. The
+// connection-kill case additionally needs MESSAGING_RABBITMQ_MANAGEMENT_URL (the
+// management API, with credentials), which both set.
 //
 // What the unit tests' fake channel cannot prove, and this file does: that a
 // real broker returns an unroutable `mandatory` message BEFORE acking it, that a
@@ -167,7 +167,11 @@ describe('RabbitMQ adapter against a real broker', { skip: !RABBITMQ_URL }, () =
     const late = `it.late.${run}`;
     const out = transport(late);
     const started = Date.now();
-    await assert.rejects(out.publish({ id: `evt-${run}-3`, topic: 'order.late', payload: {} }));
+    // The failure carries the broker's own reason, not a bare "channel closed".
+    await assert.rejects(
+      out.publish({ id: `evt-${run}-3`, topic: 'order.late', payload: {} }),
+      /NOT_FOUND - no exchange/,
+    );
     assert.ok(Date.now() - started < 4_000, 'the broker closed the channel; no confirm timeout');
 
     // The deploy-order case: the consumer side declares its topology after the
@@ -240,6 +244,7 @@ describe('RabbitMQ adapter against a real broker', { skip: !RABBITMQ_URL }, () =
     const first = await next(ordersQueue);
     const requeued = await consumer.consume({
       source: ordersQueue, channel, message: first, validate: isOrder, sideEffect: flaky,
+      retry: { delayMs: 50 },
     });
     assert.equal(requeued.outcome, 'requeued');
     const redelivered = await next(ordersQueue);
@@ -252,6 +257,184 @@ describe('RabbitMQ adapter against a real broker', { skip: !RABBITMQ_URL }, () =
       db.select().from(auditLog).all().filter((row) => row.orderId === 'o-6').length,
       1,
     );
+  });
+
+  test('a failure that persists is retried at the backoff pace, not as fast as the broker can redeliver', async () => {
+    const queue = `it.spin.${run}`;
+    await channel.assertQueue(queue, { durable: true });
+    await channel.bindQueue(queue, exchange, 'spin.*');
+    const out = transport();
+    await out.publish({ id: `evt-${run}-spin`, topic: 'spin.always', payload: { orderId: 'o-spin' } });
+    await out.close();
+
+    const spinning = await admin.createChannel();
+    let deliveries = 0;
+    const { consumerTag } = await spinning.consume(queue, (message) => {
+      if (!message) return;
+      deliveries += 1;
+      void consumer.consume({
+        source: queue,
+        channel: spinning,
+        message,
+        validate: isOrder,
+        sideEffect: () => {
+          throw new Error('database is down');
+        },
+        retry: { delayMs: 100, maxDelayMs: 100 },
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await spinning.cancel(consumerTag);
+    await spinning.close();
+    // An immediate requeue redelivers the same message about 1 400 times a
+    // second on RabbitMQ 4; waiting 100 ms per attempt allows about 10.
+    assert.ok(deliveries >= 2 && deliveries <= 15, `${deliveries} deliveries in 1 s`);
+    await channel.deleteQueue(queue);
+  });
+
+  test('an unroutable dead-letter target requeues the original instead of losing it', async () => {
+    const unbound = `it.dlx-unbound.${run}`;
+    await channel.assertExchange(unbound, 'fanout', { durable: false, autoDelete: false });
+    const out = transport();
+    await out.publish({ id: `evt-${run}-lost`, topic: 'order.bad', payload: { wrong: true } });
+    await out.close();
+    const dlqPublisher = await admin.createConfirmChannel();
+
+    const result = await consumer.consume({
+      source: ordersQueue,
+      channel,
+      message: await next(ordersQueue),
+      validate: isOrder,
+      sideEffect: recordOrder,
+      deadLetter: { channel: dlqPublisher, exchange: unbound, routingKey: '' },
+      retry: { delayMs: 50 },
+    });
+    // Without `mandatory` the broker would have acked the copy and dropped it,
+    // and the original — acked next — would exist nowhere.
+    assert.equal(result.outcome, 'requeued');
+    const again = await next(ordersQueue);
+    assert.equal(again.properties.messageId, `evt-${run}-lost`);
+    channel.ack(again);
+    await dlqPublisher.close();
+    await channel.deleteExchange(unbound);
+  });
+
+  test('a validate that throws dead-letters the message instead of retrying it', async () => {
+    const out = transport();
+    await out.publish({ id: `evt-${run}-throws`, topic: 'order.odd', payload: { orderId: 'o-9' } });
+    await out.close();
+    const dlqPublisher = await admin.createConfirmChannel();
+    const result = await consumer.consume({
+      source: ordersQueue,
+      channel,
+      message: await next(ordersQueue),
+      validate: (payload: unknown): payload is Order => {
+        return (payload as { customer: { id: string } }).customer.id.length > 0;
+      },
+      sideEffect: recordOrder,
+      deadLetter: { channel: dlqPublisher, exchange: dlx, routingKey: '' },
+    });
+    assert.equal(result.outcome, 'dead-lettered');
+    const dead = await next(dlq);
+    channel.ack(dead);
+    assert.match(String(dead.properties.headers?.[X_ERROR]), /^validate threw:/);
+    await dlqPublisher.close();
+  });
+
+  test('a numeric x-event-id from another producer is a dedup key too', async () => {
+    // JVM and Python clients send typed AMQP headers; amqplib decodes them as numbers.
+    const publish = () =>
+      channel.publish(exchange, 'order.numeric', Buffer.from(JSON.stringify({ orderId: 'o-10' })), {
+        headers: { [X_EVENT_ID]: 424242 },
+      });
+    publish();
+    publish();
+    const outcomes: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      const result = await consumer.consume({
+        source: ordersQueue,
+        channel,
+        message: await next(ordersQueue),
+        validate: isOrder,
+        sideEffect: recordOrder,
+      });
+      assert.equal(result.dedupKey, '424242');
+      outcomes.push(result.outcome);
+    }
+    assert.deepEqual(outcomes, ['processed', 'duplicate']);
+  });
+
+  test('a channel that closed before the ack does not crash the consumer; the redelivery is deduplicated', async () => {
+    const out = transport();
+    await out.publish({ id: `evt-${run}-closed`, topic: 'order.closed', payload: { orderId: 'o-11' } });
+    await out.close();
+
+    // Take the delivery on a channel that then closes — a broker restart, a
+    // lost connection, a consumer timeout — before the consumer settles it.
+    const doomed = await admin.createChannel();
+    let message: ConsumeMessage | false = false;
+    for (let attempt = 0; attempt < 50 && !message; attempt += 1) {
+      message = (await doomed.get(ordersQueue, { noAck: false })) as unknown as ConsumeMessage | false;
+      if (!message) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(message, 'the message arrived on the doomed channel');
+    await doomed.close();
+
+    const first = await consumer.consume({
+      source: ordersQueue, channel: doomed, message, validate: isOrder, sideEffect: recordOrder,
+    });
+    assert.equal(first.outcome, 'processed', 'the work committed; the ack could not be sent');
+    // The broker put the unacked delivery back when the channel closed.
+    const redelivered = await next(ordersQueue);
+    const second = await consumer.consume({
+      source: ordersQueue, channel, message: redelivered, validate: isOrder, sideEffect: recordOrder,
+    });
+    assert.equal(second.outcome, 'duplicate');
+    assert.equal(
+      db.select().from(auditLog).all().filter((row) => row.orderId === 'o-11').length,
+      1,
+    );
+  });
+
+  test('RabbitMQ 4: an explicit requeue is not counted toward a quorum queue delivery limit', async () => {
+    // The fact the consumer's own backoff exists for. Pinned here because the
+    // docs used to promise the opposite.
+    const quorum = `it.quorum.${run}`;
+    await channel.assertQueue(quorum, {
+      durable: true,
+      arguments: { 'x-queue-type': 'quorum', 'x-delivery-limit': 3, 'x-dead-letter-exchange': dlx },
+    });
+    channel.sendToQueue(quorum, Buffer.from('{}'), { persistent: true });
+    for (let i = 0; i < 6; i += 1) {
+      channel.nack(await next(quorum), false, true);
+    }
+    const still = await next(quorum);
+    assert.equal(still.properties.headers?.['x-delivery-count'], undefined);
+    channel.ack(still);
+    await channel.deleteQueue(quorum);
+  });
+
+  test('RabbitMQ 4: a delivery returned by a closed channel is counted, and dead-lettered past the limit', async () => {
+    const quorum = `it.quorum-closed.${run}`;
+    await channel.assertQueue(quorum, {
+      durable: true,
+      arguments: { 'x-queue-type': 'quorum', 'x-delivery-limit': 3, 'x-dead-letter-exchange': dlx },
+    });
+    channel.sendToQueue(quorum, Buffer.from('{}'), { persistent: true });
+    for (let i = 0; i <= 3; i += 1) {
+      const crashing = await admin.createChannel();
+      let message = false as Awaited<ReturnType<Channel['get']>>;
+      for (let attempt = 0; attempt < 50 && !message; attempt += 1) {
+        message = await crashing.get(quorum, { noAck: false });
+        if (!message) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(message, `delivery ${i + 1} arrived`);
+      await crashing.close(); // a consumer that died with the message unacked
+    }
+    const dead = await next(dlq);
+    channel.ack(dead);
+    assert.equal(await depth(quorum), 0, 'past the limit, the queue dead-lettered it');
+    await channel.deleteQueue(quorum);
   });
 
   test(
