@@ -262,8 +262,8 @@ jobs:
     # The neighbours whose own peer ranges gate 12 are not named in the set:
     # the devDependencies already sit on nestjs-cls 6.3 / @nestjs-cls/
     # transactional 3.3 (`>= 10 < 13`; 6.2 / 3.2 say `< 12`) and
-    # @nest-native/kafka 0.5.1 (the first release whose peer admits 12), and
-    # a fresh resolve picks them up. A peer that does not admit an end is a
+    # @nest-native/kafka 0.6.0 (0.5.1 was the first release whose peer admits
+    # 12), and a fresh resolve picks them up. A peer that does not admit an end is a
     # real finding — never hide it with --legacy-peer-deps.
     # Node is not a dimension here on purpose: 22 floats to a current 22.x,
     # which is what require(esm) on the 12 end needs (>=22.12), and the build
