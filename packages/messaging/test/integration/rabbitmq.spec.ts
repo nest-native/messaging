@@ -364,6 +364,33 @@ describe('RabbitMQ adapter against a real broker', { skip: !RABBITMQ_URL }, () =
     assert.deepEqual(outcomes, ['processed', 'duplicate']);
   });
 
+  test('two 64-bit ids amqplib decodes to the same number never share a dedup key', async () => {
+    // A JVM snowflake id goes on the wire as an AMQP 64-bit integer, and amqplib
+    // decodes it through a double: past 2^53 these two arrive as one number. A
+    // shared key would ack the second event as a duplicate, never processed.
+    for (const id of [1541815603606036481n, 1541815603606036482n]) {
+      channel.publish(exchange, 'order.snowflake', Buffer.from(JSON.stringify({ orderId: 'o-12' })), {
+        headers: { [X_EVENT_ID]: { '!': 'int64', value: id } },
+      });
+    }
+    const dlqPublisher = await admin.createConfirmChannel();
+    for (let i = 0; i < 2; i += 1) {
+      const result = await consumer.consume({
+        source: ordersQueue,
+        channel,
+        message: await next(ordersQueue),
+        validate: isOrder,
+        sideEffect: recordOrder,
+        deadLetter: { channel: dlqPublisher, exchange: dlx, routingKey: '' },
+      });
+      assert.deepEqual(result, { outcome: 'dead-lettered' });
+      const dead = await next(dlq);
+      channel.ack(dead);
+      assert.match(String(dead.properties.headers?.[X_ERROR]), /is an integer beyond 2\^53/);
+    }
+    await dlqPublisher.close();
+  });
+
   test('a channel that closed before the ack does not crash the consumer; the redelivery is deduplicated', async () => {
     const out = transport();
     await out.publish({ id: `evt-${run}-closed`, topic: 'order.closed', payload: { orderId: 'o-11' } });

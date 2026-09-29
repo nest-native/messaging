@@ -170,6 +170,14 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   unbound dead-letter exchange acks the copy and drops it, and the original,
   acked next, is lost. Do not reintroduce an immediate requeue, an unguarded
   settle, or a non-mandatory dead-letter publish.
+- **A dedup key must name exactly one message.** amqplib decodes a 64-bit
+  integer header through a JavaScript number, so two ids past 2^53 can arrive
+  as the same value — and a shared key acks the second event as a duplicate,
+  unprocessed. The RabbitMQ consumer therefore reads an integer header as a key
+  only while `Number.isSafeInteger` holds, and otherwise falls through to the
+  next id in the wire contract or dead-letters with that reason. Any new way
+  of turning a header into a key keeps that rule: a lossy conversion is never
+  a key.
 - **NestJS 12 is ESM-only: never import a directory index from `@nestjs/*`.**
   `@nestjs/common` and `@nestjs/core` 12 ship an exports map of
   `{".", "./internal", "./*.js", "./*": "./*.js"}`. A deep import of a *file*

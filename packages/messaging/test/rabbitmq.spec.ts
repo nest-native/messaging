@@ -365,6 +365,20 @@ describe('RabbitOutboxTransport', () => {
     assert.deepEqual(channel.calls, ['waitForConfirms', 'close']);
   });
 
+  test('close() lets a publish that has not reached the channel yet finish first', async () => {
+    const channel = new FakeConfirmChannel('slow-ack');
+    const transport = new RabbitOutboxTransport({ connection: connection(channel).source, exchange: 'events' });
+    await transport.publish(event); // open the channel
+    // Called in the same job: the publish is still awaiting its channel, so the
+    // channel has no unconfirmed publish for close() to wait for.
+    const inFlight = transport.publish({ ...event, id: 'evt-2' });
+    const closing = transport.close();
+    await inFlight;
+    await closing;
+    assert.equal(channel.published.length, 2);
+    assert.deepEqual(channel.calls, ['waitForConfirms', 'close']);
+  });
+
   test('close() stops waiting for confirms after confirmTimeoutMs', async () => {
     const channel = new FakeConfirmChannel();
     const transport = new RabbitOutboxTransport({
@@ -583,6 +597,33 @@ describe('RabbitInboxConsumer', () => {
     assert.equal(messageId.dedupKey, '7');
   });
 
+  test('never takes an id amqplib rounded as a key: it falls back to the next one, or dead-letters with the reason', async () => {
+    const consumer = new RabbitInboxConsumer(runs('processed'));
+    const { channel, settled } = deliveryChannel();
+    // amqplib reads a 64-bit integer header through a double: 1541815603606036481
+    // and 1541815603606036482 both arrive as 1541815603606036500.
+    const rounded = Number(1541815603606036481n);
+    const fallback = await consumer.consume(
+      options(channel, delivery('{"orderId":1}', { messageId: 'evt-9', headers: { [X_EVENT_ID]: rounded } })),
+    );
+    assert.equal(fallback.dedupKey, 'evt-9', 'the next id the wire contract names');
+    const lone = await consumer.consume(
+      options(channel, delivery('{"orderId":1}', { headers: { [X_IDEMPOTENCY_KEY]: rounded } })),
+    );
+    assert.deepEqual(lone, { outcome: 'dead-lettered' });
+    assert.ok(logged(`${X_IDEMPOTENCY_KEY} 1541815603606036500 is an integer beyond 2^53`));
+    const fraction = await consumer.consume(
+      options(channel, delivery('{"orderId":1}', { headers: { [X_EVENT_ID]: 1.5 } })),
+    );
+    assert.deepEqual(fraction, { outcome: 'dead-lettered' });
+    assert.ok(logged('cannot deduplicate'), 'a fraction is simply not a key');
+    assert.deepEqual(settled, [
+      { kind: 'ack' },
+      { kind: 'nack', requeue: false },
+      { kind: 'nack', requeue: false },
+    ]);
+  });
+
   const poison: [string, ConsumeMessage, RegExp, string | undefined][] = [
     ['no dedup key at all', delivery('{"orderId":1}'), /cannot deduplicate/, undefined],
     ['a body that is not JSON', delivery('not json', { messageId: 'm' }), /not valid JSON/, 'm'],
@@ -752,6 +793,96 @@ describe('RabbitInboxConsumer', () => {
     await consumer.consume(options(channel, delivery('{"nope":2}', { messageId: 'b' }), { deadLetter }));
     assert.equal(dlq.listenerCount('return'), 1);
     assert.equal(dlq.published.length, 2);
+  });
+
+  test('a dead-letter channel the broker closes is logged, not thrown out of amqplib', async () => {
+    const consumer = new RabbitInboxConsumer(runs('processed'));
+    const { channel } = deliveryChannel();
+    const dlq = new FakeConfirmChannel();
+    const deadLetter = { channel: dlq as unknown as ConfirmChannel, exchange: 'dlx', routingKey: 'dead' };
+    await consumer.consume(options(channel, delivery('{"nope":1}', { messageId: 'a' }), { deadLetter }));
+    await consumer.consume(options(channel, delivery('{"nope":2}', { messageId: 'b' }), { deadLetter }));
+    assert.equal(dlq.listenerCount('error'), 1);
+    // amqplib emits the broker's reason as 'error'; with no listener, the
+    // emitter would throw it into amqplib, which closes the whole connection.
+    assert.doesNotThrow(() => dlq.serverClose("NOT_FOUND - no exchange 'dlx'"));
+    assert.ok(logged("the dead-letter channel was closed by the broker: NOT_FOUND - no exchange 'dlx'"));
+  });
+
+  test('cuts a long reason in the x-error header, saying how much was left out', async () => {
+    const consumer = new RabbitInboxConsumer(runs('processed'));
+    const { channel } = deliveryChannel();
+    const dlq = new FakeConfirmChannel();
+    const result = await consumer.consume({
+      source: 'q',
+      channel,
+      message: delivery('{"orderId":1}', { messageId: 'm' }),
+      // A schema validator's message for a large payload can run to 100 KB;
+      // amqplib cannot encode a header table past 64 KiB.
+      validate: (_p: unknown): _p is Payload => {
+        throw new Error('x'.repeat(120_000));
+      },
+      sideEffect: () => assert.fail('must not run'),
+      deadLetter: { channel: dlq as unknown as ConfirmChannel, exchange: 'dlx', routingKey: 'dead' },
+    });
+    assert.deepEqual(result, { outcome: 'dead-lettered', dedupKey: 'm' });
+    const reason = (dlq.published[0]?.options.headers as Record<string, unknown>)[X_ERROR] as string;
+    assert.match(reason, /^validate threw: x+… \(119016 more characters\)$/);
+    assert.equal(reason.indexOf('…'), 1_000);
+  });
+
+  test('a dead-letter target that keeps failing backs off like a transient failure', async () => {
+    const consumer = new RabbitInboxConsumer(runs('processed'));
+    const { channel } = deliveryChannel();
+    const dlq = new FakeConfirmChannel('nack');
+    const poisonAgain = () =>
+      consumer.consume(
+        options(channel, delivery('{"nope":1}', { messageId: 'm' }), {
+          retry: { delayMs: 1, maxDelayMs: 4 },
+          deadLetter: { channel: dlq as unknown as ConfirmChannel, exchange: 'dlx', routingKey: 'dead' },
+        }),
+      );
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await poisonAgain();
+    }
+    // Once the copy is stored, the count starts over.
+    dlq.behaviour = 'ack';
+    assert.equal((await poisonAgain()).outcome, 'dead-lettered');
+    dlq.behaviour = 'nack';
+    await poisonAgain();
+    const waits = logs
+      .map((l) => /requeued in (\d+) ms/.exec(String(l.message)))
+      .filter(Boolean)
+      .map((m) => m![1]);
+    assert.deepEqual(waits, ['1', '2', '4', '4', '1']);
+  });
+
+  test('consumers that share a dead-letter channel share its return listener', async () => {
+    const first = new RabbitInboxConsumer(runs('processed'));
+    const second = new RabbitInboxConsumer(runs('processed'));
+    const { channel } = deliveryChannel();
+    const dlq = new FakeConfirmChannel('return');
+    const deadLetter = { channel: dlq as unknown as ConfirmChannel, exchange: 'dlx', routingKey: 'dead' };
+    const poisonTo = (consumer: RabbitInboxConsumer, id: string) =>
+      consumer.consume(options(channel, delivery('{"nope":1}', { messageId: id }), { retry: fast, deadLetter }));
+    // Each consumer sees the return of its own copy, and only one listener
+    // records returns, so no consumer keeps the ids of another's copies.
+    assert.equal((await poisonTo(first, 'a')).outcome, 'requeued');
+    assert.equal((await poisonTo(second, 'b')).outcome, 'requeued');
+    assert.equal(dlq.listenerCount('return'), 1);
+    dlq.behaviour = 'ack';
+    assert.equal((await poisonTo(first, 'c')).outcome, 'dead-lettered');
+  });
+
+  test('the wait before a requeue does not keep the process alive', async (t) => {
+    const timers = t.mock.method(globalThis, 'setTimeout');
+    const consumer = new RabbitInboxConsumer(failing());
+    const { channel } = deliveryChannel();
+    await consumer.consume(options(channel, delivery('{"orderId":1}', { messageId: 'm' }), { retry: { delayMs: 3 } }));
+    const waits = timers.mock.calls.filter((call) => call.arguments[1] === 3);
+    assert.equal(waits.length, 1);
+    // After shutdown the broker already has the delivery back; the wait must not hold the process.
+    assert.equal((waits[0]!.result as NodeJS.Timeout).hasRef(), false);
   });
 
   test('requeues a delivery whose side effect failed transiently, after a wait', async () => {

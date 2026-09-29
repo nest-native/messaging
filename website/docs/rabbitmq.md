@@ -106,10 +106,12 @@ The transport opens one confirm channel on first use and reopens it whenever
 the broker closes it. amqplib's recovering connection comes back on its own
 after a broker restart, but its channels do not; this is what bridges the two.
 `close()` closes the transport's channel, never your connection. It first lets
-outstanding confirms arrive (up to `confirmTimeoutMs`) — amqplib ignores acks
-that arrive after a channel starts closing, so closing mid-publish would fail
-publishes the broker already took — and it never waits for a channel that is
-still opening, which on a recovering connection can take the whole outage.
+the publishes already under way settle — counted from the moment each was
+called — and the outstanding confirms arrive (each up to `confirmTimeoutMs`):
+amqplib ignores acks that arrive after a channel starts closing, so closing
+mid-publish would fail publishes the broker already took. It never waits for a
+channel that is still opening, which on a recovering connection can take the
+whole outage.
 
 ## Consuming: `RabbitInboxConsumer`
 
@@ -124,9 +126,13 @@ inside the inbox's dedup transaction and settles the delivery itself:
 | Side effect or database failed | `nack` with requeue after a backoff — `requeued`; dead-lettered after `retry.maxAttempts` |
 
 The dedup key follows the wire contract: `x-event-id`, then
-`x-idempotency-key`, then the AMQP `messageId`. A header value amqplib decodes
-as a number — JVM and Python producers send typed headers — is read as its
-string form. The result carries the dedup key on every outcome it could be
+`x-idempotency-key`, then the AMQP `messageId`. An integer header value — JVM
+and Python producers send typed headers — is read as its string form, as long
+as it is exact. amqplib decodes a 64-bit integer through a JavaScript number,
+so beyond 2^53 two different ids can arrive as the same value; such a value is
+never used as a key. The next id the wire contract names is used instead, and a
+message with no other id is dead-lettered with that reason. Send ids that large
+as strings. The result carries the dedup key on every outcome it could be
 derived for, so a dead letter or a requeue can be traced to its event.
 
 `consume` never rejects. If the channel closes before the delivery can be
@@ -191,8 +197,15 @@ Postgres and MySQL it may be async.
   to match a return to it): if no queue is bound behind the dead-letter
   exchange — a typo, a missing binding, a queue declared later — the broker
   returns it instead of acking it into the void. If the copy fails for any
-  reason, the original is requeued, after the same backoff as a transient
-  failure, rather than lost.
+  reason, the original is requeued rather than lost, after the same backoff a
+  transient failure gets — doubling on the same attempt count, so a broken
+  target slows down to the cap. The reason is cut to 1 000 characters (amqplib
+  cannot encode a header table past 64 KiB, and a schema validator's message
+  can be far longer), and the consumer listens for `error` on the dead-letter
+  channel, so a channel the broker closes — an exchange that does not exist, a
+  missing permission — fails the copy instead of closing your whole connection.
+  A closed channel stays closed: open a new one, as the samples do when either
+  channel closes.
 - **Without it** — the delivery is rejected without requeue. That reaches a
   dead-letter queue only if the queue was declared with an
   `x-dead-letter-exchange`, and the reason survives only in your logs.
@@ -209,7 +222,9 @@ RabbitMQ 4.3: a consumer that requeues at once sees the same message about
 So the consumer waits before every requeue: 1 s, doubling with each failed
 attempt of the same message, capped at 30 s. While it waits the delivery stays
 unacked and holds one prefetch slot, so a failure that persists slows its
-consumer down instead of spinning. Tune it per call, and give up if you want a
+consumer down instead of spinning. The wait does not keep the process alive:
+once your application has shut down, its channel is gone and the broker
+already has the delivery back. Tune it per call, and give up if you want a
 bound:
 
 ```ts

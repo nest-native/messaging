@@ -27,11 +27,15 @@ package release is useful for users.
   count an explicit requeue toward a quorum queue's delivery limit, and an
   immediate requeue spun at about 1 400 redeliveries a second), publishes its
   dead-letter copies `mandatory` so an unbound dead-letter exchange cannot
-  swallow one, treats a `validate` that throws as poison, reads numeric AMQP
-  header values as keys, and reports the dedup key on every outcome. The
-  transport carries the broker's reason when it closes the channel, drains
-  outstanding confirms before `close()`, and never waits in `close()` for a
-  channel that is still opening. Verified against a real RabbitMQ 4 broker by
+  swallow one, backs off on a dead-letter target that keeps failing, bounds
+  the `x-error` reason to 1 000 characters, listens for `error` on the
+  dead-letter channel so a broker-closed one cannot close the connection,
+  treats a `validate` that throws as poison, reads exact integer header values
+  as keys — never a 64-bit id amqplib rounded past 2^53, which could make two
+  events one — and reports the dedup key on every outcome. The transport
+  carries the broker's reason when it closes the channel, lets publishes
+  already under way and outstanding confirms settle before `close()` closes
+  it, and never waits in `close()` for a channel that is still opening. Verified against a real RabbitMQ 4 broker by
   a new gated spec, which CI runs on every PR (below). The broker-neutral
   consumer helpers (`deriveDedupKey`, `actionForError`, …) are now shared by
   both adapters and exported from `/rabbitmq` as well as `/kafka`.

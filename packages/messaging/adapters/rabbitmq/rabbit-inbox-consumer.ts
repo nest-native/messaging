@@ -9,6 +9,8 @@ import {
   decodeWireValue,
   headerToString,
   X_ERROR,
+  X_EVENT_ID,
+  X_IDEMPOTENCY_KEY,
   type WireHeaderValue,
 } from '../../wire-contract';
 
@@ -97,6 +99,22 @@ const DEFAULT_RETRY_DELAY_MS = 1_000;
 const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
 /** Attempt counts are kept for at most this many failing messages, oldest dropped first. */
 const MAX_TRACKED_ATTEMPTS = 10_000;
+/**
+ * The longest reason an `x-error` header carries; a longer one is cut, noting
+ * how much. amqplib encodes a header table into a 64 KiB buffer, so an
+ * unbounded reason — a validator's message can run to 100 KB — would make the
+ * dead-letter copy impossible to publish.
+ */
+const MAX_REASON_LENGTH = 1_000;
+
+const logger = new Logger('RabbitInboxConsumer');
+
+/**
+ * The dead-letter copies each channel handed back. Tracked once per channel, for
+ * every consumer that publishes on it: the channel's single 'return' listener
+ * adds a copy's id, and the publish that sent the copy removes it.
+ */
+const deadLetterReturns = new WeakMap<ConfirmChannel, Set<string>>();
 
 type Settlement = 'ack' | 'requeue' | 'reject';
 
@@ -116,14 +134,14 @@ type Settlement = 'ack' | 'requeue' | 'reject';
  *
  * The dedup key follows the shared wire contract: `x-event-id`, then
  * `x-idempotency-key`, then the AMQP `messageId` — what the RabbitMQ outbox
- * transport sets on every message. Header values amqplib decodes as numbers
- * (common from JVM and Python producers) are read as their string form.
+ * transport sets on every message. An integer header value (common from JVM and
+ * Python producers) is read as its string form while it is exact; amqplib
+ * rounds a 64-bit integer beyond 2^53, so such a value is never a key.
  */
 @Injectable()
 export class RabbitInboxConsumer {
-  private readonly logger = new Logger(RabbitInboxConsumer.name);
+  private readonly logger = logger;
   private readonly attempts = new Map<string, number>();
-  private readonly deadLetterReturns = new WeakMap<ConfirmChannel, Set<string>>();
 
   constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
 
@@ -131,10 +149,7 @@ export class RabbitInboxConsumer {
     const { channel, message, source } = options;
     let dedupKey: string | undefined;
     try {
-      dedupKey = deriveDedupKey(
-        normalizeHeaders(message.properties.headers),
-        headerText(message.properties.messageId),
-      );
+      dedupKey = dedupKeyOf(message);
       const payload = decodePayload(message);
       if (!isValid(options.validate, payload)) {
         throw new PermanentError('payload failed validation');
@@ -160,14 +175,12 @@ export class RabbitInboxConsumer {
   ): Promise<RabbitConsumeResult> {
     const retry = options.retry ?? {};
     if (actionForError(error) === 'dead-letter') {
-      this.forget(options.source, dedupKey);
       return this.deadLetter(options, describe(error), dedupKey, retry);
     }
     // Only work that already derived a key can fail transiently: the key, the
     // body and the payload are all checked (as PermanentErrors) before it.
     const attempt = this.countAttempt(options.source, dedupKey);
     if (attempt >= (retry.maxAttempts ?? Infinity)) {
-      this.forget(options.source, dedupKey);
       return this.deadLetter(
         options,
         `gave up after ${attempt} attempts: ${describe(error)}`,
@@ -188,19 +201,21 @@ export class RabbitInboxConsumer {
     dedupKey: string | undefined,
     retry: RabbitRetryOptions,
   ): Promise<RabbitConsumeResult> {
-    const { channel, message, deadLetter } = options;
+    const { channel, message, deadLetter, source } = options;
     if (!deadLetter) {
       this.logger.warn(`rejected without requeue: ${reason}`);
+      this.forget(source, dedupKey);
       this.settle(channel, message, 'reject');
       return result('dead-lettered', dedupKey);
     }
     try {
-      await this.publishDeadLetter(deadLetter, message, reason);
+      await publishDeadLetter(deadLetter, message, reason);
     } catch (publishError) {
       // The poison message is not stored anywhere yet, so the original must not
-      // be dropped: hand it back — after the same wait a transient failure gets,
-      // so a broken dead-letter target cannot spin.
-      const attempt = this.countAttempt(options.source, dedupKey);
+      // be dropped: hand it back — after the same backoff a transient failure
+      // gets, counted on the same attempts, so a broken dead-letter target
+      // slows down to the cap instead of spinning.
+      const attempt = this.countAttempt(source, dedupKey);
       const delay = backoff(attempt, retry);
       this.logger.warn(
         `could not dead-letter (${describe(publishError)}); requeued in ${delay} ms: ${reason}`,
@@ -208,6 +223,7 @@ export class RabbitInboxConsumer {
       return this.requeueAfter(options, delay, dedupKey);
     }
     this.logger.warn(`dead-lettered to ${deadLetter.exchange}: ${reason}`);
+    this.forget(source, dedupKey);
     this.settle(channel, message, 'ack');
     return result('dead-lettered', dedupKey);
   }
@@ -245,84 +261,6 @@ export class RabbitInboxConsumer {
     }
   }
 
-  private publishDeadLetter(
-    target: RabbitDeadLetterTarget,
-    message: ConsumeMessage,
-    reason: string,
-  ): Promise<void> {
-    const returned = this.returnsFor(target.channel);
-    const id = randomUUID();
-    // Only the descriptive properties carry over. `expiration` would let the
-    // dead-letter copy expire, and `userId` must match the publishing
-    // connection's user or the broker closes the channel.
-    const { contentType, contentEncoding, correlationId, messageId, timestamp, type, appId } =
-      message.properties;
-    return new Promise((resolve, reject) => {
-      const confirmed = (error: unknown): void => {
-        // The broker returns an unroutable message before it acks it.
-        const wasReturned = returned.delete(id);
-        if (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        } else if (wasReturned) {
-          reject(
-            new Error(
-              `no queue is bound to exchange "${target.exchange}" for routing key "${target.routingKey}"`,
-            ),
-          );
-        } else {
-          resolve();
-        }
-      };
-      try {
-        target.channel.publish(
-          target.exchange,
-          target.routingKey,
-          message.content,
-          {
-            contentType,
-            contentEncoding,
-            correlationId,
-            messageId,
-            timestamp,
-            type,
-            appId,
-            persistent: true,
-            mandatory: true,
-            headers: {
-              ...message.properties.headers,
-              [X_ERROR]: reason,
-              [X_DEAD_LETTER_ID]: id,
-            },
-          },
-          confirmed,
-        );
-      } catch (error) {
-        // A closed channel throws synchronously instead of calling back.
-        returned.delete(id);
-        reject(error);
-      }
-    });
-  }
-
-  /** The dead-letter copies a channel handed back, tracked once per channel. */
-  private returnsFor(channel: ConfirmChannel): Set<string> {
-    const tracked = this.deadLetterReturns.get(channel);
-    if (tracked) {
-      return tracked;
-    }
-    const returned = new Set<string>();
-    channel.on('return', (message: Message) => {
-      const id = headerToString(
-        message.properties.headers?.[X_DEAD_LETTER_ID] as WireHeaderValue,
-      );
-      if (id) {
-        returned.add(id);
-      }
-    });
-    this.deadLetterReturns.set(channel, returned);
-    return returned;
-  }
-
   /** Counts a failed attempt of one message, keeping at most MAX_TRACKED_ATTEMPTS counts. */
   private countAttempt(source: string, dedupKey: string | undefined): number {
     if (dedupKey === undefined) {
@@ -346,6 +284,124 @@ export class RabbitInboxConsumer {
   }
 }
 
+/**
+ * Republishes a poison message to the dead-letter target, resolving once the
+ * broker confirmed the copy and did not return it.
+ */
+function publishDeadLetter(
+  target: RabbitDeadLetterTarget,
+  message: ConsumeMessage,
+  reason: string,
+): Promise<void> {
+  const returned = watchDeadLetterChannel(target.channel);
+  const id = randomUUID();
+  // Only the descriptive properties carry over. `expiration` would let the
+  // dead-letter copy expire, and `userId` must match the publishing
+  // connection's user or the broker closes the channel.
+  const { contentType, contentEncoding, correlationId, messageId, timestamp, type, appId } =
+    message.properties;
+  return new Promise((resolve, reject) => {
+    const confirmed = (error: unknown): void => {
+      // The broker returns an unroutable message before it acks it.
+      const wasReturned = returned.delete(id);
+      if (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      } else if (wasReturned) {
+        reject(
+          new Error(
+            `no queue is bound to exchange "${target.exchange}" for routing key "${target.routingKey}"`,
+          ),
+        );
+      } else {
+        resolve();
+      }
+    };
+    try {
+      target.channel.publish(
+        target.exchange,
+        target.routingKey,
+        message.content,
+        {
+          contentType,
+          contentEncoding,
+          correlationId,
+          messageId,
+          timestamp,
+          type,
+          appId,
+          persistent: true,
+          mandatory: true,
+          headers: {
+            ...message.properties.headers,
+            [X_ERROR]: boundedReason(reason),
+            [X_DEAD_LETTER_ID]: id,
+          },
+        },
+        confirmed,
+      );
+    } catch (error) {
+      // A closed channel throws synchronously instead of calling back.
+      returned.delete(id);
+      reject(error);
+    }
+  });
+}
+
+/**
+ * Listens on a dead-letter channel, once per channel: 'return' matches a
+ * returned copy to its publish, and 'error' keeps a channel the broker closes —
+ * a dead-letter exchange that does not exist, a missing permission — from
+ * throwing out of amqplib, which would close the whole connection (or crash the
+ * process) instead of just failing the copy.
+ */
+function watchDeadLetterChannel(channel: ConfirmChannel): Set<string> {
+  const tracked = deadLetterReturns.get(channel);
+  if (tracked) {
+    return tracked;
+  }
+  const returned = new Set<string>();
+  channel.on('return', (message: Message) => {
+    const id = headerToString(message.properties.headers?.[X_DEAD_LETTER_ID] as WireHeaderValue);
+    if (id) {
+      returned.add(id);
+    }
+  });
+  channel.on('error', (error: unknown) => {
+    logger.warn(`the dead-letter channel was closed by the broker: ${describe(error)}`);
+  });
+  deadLetterReturns.set(channel, returned);
+  return returned;
+}
+
+/** Cuts a reason to {@link MAX_REASON_LENGTH} characters, saying how much was left out. */
+function boundedReason(reason: string): string {
+  if (reason.length <= MAX_REASON_LENGTH) {
+    return reason;
+  }
+  const cut = reason.length - MAX_REASON_LENGTH;
+  return `${reason.slice(0, MAX_REASON_LENGTH)}… (${cut} more characters)`;
+}
+
+/**
+ * The delivery's dedup key. A message whose only id is an integer amqplib
+ * rounded is dead-lettered with that reason, not the generic "no key" one.
+ */
+function dedupKeyOf(message: ConsumeMessage): string {
+  const headers = message.properties.headers;
+  try {
+    return deriveDedupKey(normalizeHeaders(headers), headerText(message.properties.messageId));
+  } catch (error) {
+    const rounded = [X_EVENT_ID, X_IDEMPOTENCY_KEY].find((name) => isInexact(headers?.[name]));
+    if (rounded === undefined) {
+      throw error;
+    }
+    throw new PermanentError(
+      `${rounded} ${String(headers?.[rounded])} is an integer beyond 2^53, which amqplib ` +
+        'decodes rounded, so it cannot identify the message — send it as a string',
+    );
+  }
+}
+
 function attemptKey(source: string, dedupKey: string): string {
   return `${source}\u0000${dedupKey}`;
 }
@@ -357,7 +413,10 @@ function backoff(attempt: number, retry: RabbitRetryOptions): number {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  // Unref'd: while the application runs, its connection keeps the process
+  // alive; once it has shut down, the channel is gone and the broker already
+  // took the delivery back, so the wait must not hold the process open.
+  return new Promise((resolve) => setTimeout(resolve, ms).unref());
 }
 
 function result(
@@ -369,8 +428,8 @@ function result(
 
 /**
  * amqplib decodes typed AMQP header values: numbers, booleans, timestamps,
- * tables. The wire contract speaks strings and Buffers, so a number is read as
- * its string form and anything else is not a usable key.
+ * tables. The wire contract speaks strings and Buffers, so an exact integer is
+ * read as its string form and anything else is not a usable key.
  */
 function normalizeHeaders(
   headers: Record<string, unknown> | undefined,
@@ -395,10 +454,19 @@ function headerText(value: unknown): string | undefined {
   if (Buffer.isBuffer(value)) {
     return value.toString('utf8');
   }
-  if (typeof value === 'number' || typeof value === 'bigint') {
+  if (typeof value === 'bigint' || (typeof value === 'number' && Number.isSafeInteger(value))) {
     return String(value);
   }
   return undefined;
+}
+
+/**
+ * An integer beyond 2^53: amqplib decodes a 64-bit integer header through a
+ * double, so two different ids that large can arrive as the same number — and
+ * would share a dedup key.
+ */
+function isInexact(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value);
 }
 
 /** A guard that throws has judged the same bytes the same way every time: that is permanent. */

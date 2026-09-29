@@ -74,6 +74,8 @@ export class RabbitOutboxTransport implements OutboxTransport {
   private channel: Promise<OpenChannel> | undefined;
   /** The same channel once it has opened, for a `close()` that must not wait. */
   private open: OpenChannel | undefined;
+  /** Publishes under way, from the call on — `close()` lets them finish. */
+  private readonly inFlight = new Set<Promise<void>>();
   private readonly returned = new Set<string>();
   private readonly confirmTimeoutMs: number;
 
@@ -82,6 +84,16 @@ export class RabbitOutboxTransport implements OutboxTransport {
   }
 
   async publish(message: OutboxMessage): Promise<void> {
+    const attempt = this.send(message);
+    this.inFlight.add(attempt);
+    try {
+      await attempt;
+    } finally {
+      this.inFlight.delete(attempt);
+    }
+  }
+
+  private async send(message: OutboxMessage): Promise<void> {
     const state = await this.withTimeout(this.openChannel(), 'waiting for a confirm channel');
     const routingKey = `${this.options.routingKeyPrefix ?? ''}${message.topic}`;
     const confirmed = new Promise<void>((resolve, reject) => {
@@ -129,10 +141,12 @@ export class RabbitOutboxTransport implements OutboxTransport {
   /**
    * Closes the transport's channel; the connection stays open — it is not ours.
    *
-   * An open channel is closed only after its outstanding confirms arrive
-   * (bounded by `confirmTimeoutMs`): amqplib ignores acks that arrive after it
-   * asks the broker to close the channel, so closing mid-publish would fail
-   * publishes the broker already took, and the claimer would send them again.
+   * An open channel is closed only after the publishes already under way have
+   * settled and its outstanding confirms have arrived (each bounded by
+   * `confirmTimeoutMs`): amqplib ignores acks that arrive after it asks the
+   * broker to close the channel, so closing mid-publish would fail publishes
+   * the broker already took, and the claimer would send them again. A publish
+   * counts from the moment it is called, not from when it reaches the channel.
    * A channel still opening is not waited for — on a recovering connection that
    * can take the whole outage — and is closed as soon as it opens.
    */
@@ -142,6 +156,7 @@ export class RabbitOutboxTransport implements OutboxTransport {
     this.channel = undefined;
     this.open = undefined;
     if (open) {
+      await Promise.allSettled([...this.inFlight]);
       await this.withTimeout(open.channel.waitForConfirms(), 'draining confirms before closing').catch(
         () => undefined,
       );

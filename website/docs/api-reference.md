@@ -465,10 +465,13 @@ const X_DEAD_LETTER_ID = 'x-dead-letter-id'; // matches a returned dead-letter c
 
 Processed and duplicate deliveries are acked. A `PermanentError` (no dedup key,
 a body that is not JSON, a payload `validate` rejects or throws on) is
-republished to `deadLetter` — `mandatory`, with an `x-error` header — and the
-original acked once the broker confirms the copy; if the copy fails or comes
-back unroutable, the original is requeued instead. With no `deadLetter` it is
-rejected without requeue. Any other error is `nack`ed with requeue after a
+republished to `deadLetter` — `mandatory`, with an `x-error` header of at most
+1 000 characters — and the original acked once the broker confirms the copy; if
+the copy fails or comes back unroutable, the original is requeued instead,
+after the same backoff as a transient failure. With no `deadLetter` it is
+rejected without requeue. An integer header is a dedup key only while it is
+exact: amqplib rounds a 64-bit integer beyond 2^53, so such a value is never a
+key. Any other error is `nack`ed with requeue after a
 backoff, or dead-lettered once `retry.maxAttempts` is reached. A channel that
 closed before the delivery could be settled is logged, not thrown: the broker
 redelivers the delivery.
