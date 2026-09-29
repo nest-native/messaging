@@ -268,6 +268,21 @@ jobs:
     # Node is not a dimension here on purpose: 22 floats to a current 22.x,
     # which is what require(esm) on the 12 end needs (>=22.12), and the build
     # job already covers 24.
+    # The RabbitMQ samples (02, 03) in the sample matrix need a real broker.
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management
+        env:
+          RABBITMQ_DEFAULT_USER: messaging
+          RABBITMQ_DEFAULT_PASS: messaging
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
     strategy:
       fail-fast: false
       matrix:
@@ -305,6 +320,9 @@ jobs:
         run: npm run build --workspace @nest-native/messaging
 
       - name: Run the sample matrix against NestJS ${{ matrix.nest.label }}
+        env:
+          RABBITMQ_URL: amqp://messaging:messaging@127.0.0.1:5672
+          RABBITMQ_MANAGEMENT_URL: http://messaging:messaging@127.0.0.1:15672
         run: npm run ci:sample
 
   release-and-security:
@@ -329,7 +347,23 @@ jobs:
   samples:
     name: Sample validation
     runs-on: ubuntu-latest
-    # The showcase runs on SQLite in-memory; no external DB services needed.
+    # The showcase and the Kafka sample run in-process on SQLite. The RabbitMQ
+    # samples (02, 03) need a real broker, and its management API to drop their
+    # connections; they fail rather than skip when CI does not provide both.
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management
+        env:
+          RABBITMQ_DEFAULT_USER: messaging
+          RABBITMQ_DEFAULT_PASS: messaging
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -343,6 +377,9 @@ jobs:
         run: npm run build --workspace @nest-native/messaging
 
       - name: Run sample matrix
+        env:
+          RABBITMQ_URL: amqp://messaging:messaging@127.0.0.1:5672
+          RABBITMQ_MANAGEMENT_URL: http://messaging:messaging@127.0.0.1:15672
         run: |
           START=$SECONDS
           npm run ci:sample
