@@ -413,10 +413,7 @@ function backoff(attempt: number, retry: RabbitRetryOptions): number {
 }
 
 function sleep(ms: number): Promise<void> {
-  // Unref'd: while the application runs, its connection keeps the process
-  // alive; once it has shut down, the channel is gone and the broker already
-  // took the delivery back, so the wait must not hold the process open.
-  return new Promise((resolve) => setTimeout(resolve, ms).unref());
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function result(

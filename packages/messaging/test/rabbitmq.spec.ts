@@ -874,17 +874,6 @@ describe('RabbitInboxConsumer', () => {
     assert.equal((await poisonTo(first, 'c')).outcome, 'dead-lettered');
   });
 
-  test('the wait before a requeue does not keep the process alive', async (t) => {
-    const timers = t.mock.method(globalThis, 'setTimeout');
-    const consumer = new RabbitInboxConsumer(failing());
-    const { channel } = deliveryChannel();
-    await consumer.consume(options(channel, delivery('{"orderId":1}', { messageId: 'm' }), { retry: { delayMs: 3 } }));
-    const waits = timers.mock.calls.filter((call) => call.arguments[1] === 3);
-    assert.equal(waits.length, 1);
-    // After shutdown the broker already has the delivery back; the wait must not hold the process.
-    assert.equal((waits[0]!.result as NodeJS.Timeout).hasRef(), false);
-  });
-
   test('requeues a delivery whose side effect failed transiently, after a wait', async () => {
     const consumer = new RabbitInboxConsumer(failing());
     const { channel, settled } = deliveryChannel();

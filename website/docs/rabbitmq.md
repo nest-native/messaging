@@ -222,9 +222,7 @@ RabbitMQ 4.3: a consumer that requeues at once sees the same message about
 So the consumer waits before every requeue: 1 s, doubling with each failed
 attempt of the same message, capped at 30 s. While it waits the delivery stays
 unacked and holds one prefetch slot, so a failure that persists slows its
-consumer down instead of spinning. The wait does not keep the process alive:
-once your application has shut down, its channel is gone and the broker
-already has the delivery back. Tune it per call, and give up if you want a
+consumer down instead of spinning. Tune it per call, and give up if you want a
 bound:
 
 ```ts
