@@ -111,9 +111,9 @@ describe('RabbitMQ adapter against a real broker', { skip: !RABBITMQ_URL }, () =
     db.insert(auditLog).values({ eventKey: key, orderId: payload.orderId }).run();
   };
 
-  async function next(queue: string): Promise<ConsumeMessage> {
+  async function next(queue: string, on: Channel = channel): Promise<ConsumeMessage> {
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      const message = await channel.get(queue, { noAck: false });
+      const message = await on.get(queue, { noAck: false });
       // channel.get hands back a GetMessage; the consumer only reads the fields
       // both shapes share (content, properties, redelivered).
       if (message) return message as unknown as ConsumeMessage;
@@ -317,6 +317,39 @@ describe('RabbitMQ adapter against a real broker', { skip: !RABBITMQ_URL }, () =
     channel.ack(again);
     await dlqPublisher.close();
     await channel.deleteExchange(unbound);
+  });
+
+  test('a dead-letter exchange that does not exist fails the copy, not the connection', async () => {
+    const out = transport();
+    await out.publish({ id: `evt-${run}-nodlx`, topic: 'order.poison', payload: { nope: true } });
+    await out.close();
+    // A connection of its own, so a regression fails this test instead of
+    // taking the suite's connection down with it.
+    const own = await connect(RABBITMQ_URL!);
+    own.on('error', () => undefined);
+    try {
+      const delivery = await own.createChannel();
+      // No 'error' listener on this one: the broker closes it (404), and
+      // amqplib turns an unheard 'error' into a connection error that takes
+      // every channel down. The consumer listens on it itself.
+      const dlqPublisher = await own.createConfirmChannel();
+      const result = await consumer.consume({
+        source: ordersQueue,
+        channel: delivery,
+        message: await next(ordersQueue, delivery),
+        validate: isOrder,
+        sideEffect: recordOrder,
+        retry: { delayMs: 1 },
+        deadLetter: { channel: dlqPublisher, exchange: `it.missing.${run}`, routingKey: '' },
+      });
+      assert.equal(result.outcome, 'requeued', 'the copy failed, so the original went back');
+      // Only the dead-letter channel closed: the connection still works, and
+      // the original is back in its queue.
+      await delivery.checkQueue(ordersQueue);
+      channel.ack(await next(ordersQueue));
+    } finally {
+      await own.close().catch(() => undefined);
+    }
   });
 
   test('a validate that throws dead-letters the message instead of retrying it', async () => {

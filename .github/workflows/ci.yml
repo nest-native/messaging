@@ -374,6 +374,8 @@ jobs:
   integration:
     name: Real-backend integration (PostgreSQL, MySQL, RabbitMQ)
     runs-on: ubuntu-latest
+    # A broker operation on a dead connection can wait forever; fail instead.
+    timeout-minutes: 15
     # The gated specs (packages/messaging/test/integration) against real
     # services, from the same images compose.yaml runs locally. The specs skip
     # when their backend URL is unset so forks stay green — which is why this
