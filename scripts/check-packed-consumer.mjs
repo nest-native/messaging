@@ -129,6 +129,7 @@ const sqlite = require('@nest-native/messaging/sqlite');
 const postgres = require('@nest-native/messaging/postgres');
 const mysql = require('@nest-native/messaging/mysql');
 const testing = require('@nest-native/messaging/testing');
+const rabbitmq = require('@nest-native/messaging/rabbitmq');
 const packageJson = require('@nest-native/messaging/package.json');
 
 // Every public entry point resolves from the packed tarball and exports its
@@ -154,6 +155,15 @@ for (const name of ['MysqlOutboxStore', 'MysqlInboxStore', 'outboxEvents', 'inbo
 }
 assert.ok('InMemoryOutboxTransport' in testing, 'missing testing export');
 assert.ok(packageJson.exports['./kafka'], 'missing ./kafka subpath export');
+for (const name of [
+  'RabbitOutboxTransport', 'RabbitInboxConsumer', 'X_DEAD_LETTER_ID',
+  'deriveDedupKey', 'actionForError',
+]) {
+  assert.ok(name in rabbitmq, 'missing rabbitmq export: ' + name);
+}
+// The RabbitMQ entry imports only amqplib's TYPES, so it loads without it:
+// this consumer never installs amqplib (an optional peer).
+assert.throws(() => require.resolve('amqplib'), 'the consumer smoke must not install amqplib');
 
 // The published package declares zero runtime dependencies (consumers only pull
 // the peers they actually use).
@@ -188,6 +198,28 @@ assert.equal(
     }),
     core.PermanentError,
   );
+
+  // The RabbitMQ transport runs on any confirm-channel source — here a
+  // hand-rolled one, since amqplib is absent — and resolves on the broker's ack.
+  const { EventEmitter } = require('node:events');
+  const channel = new EventEmitter();
+  const published = [];
+  channel.publish = (exchange, routingKey, content, options, callback) => {
+    published.push({ exchange, routingKey, options });
+    setImmediate(() => callback(null));
+    return true;
+  };
+  channel.waitForConfirms = async () => undefined;
+  channel.close = async () => undefined;
+  const rabbit = new rabbitmq.RabbitOutboxTransport({
+    connection: { createConfirmChannel: async () => channel },
+    exchange: 'events',
+  });
+  await rabbit.publish({ id: 'e4', topic: 'order.placed', payload: { ok: true } });
+  await rabbit.close();
+  assert.equal(published.length, 1);
+  assert.equal(published[0].routingKey, 'order.placed');
+  assert.equal(published[0].options.mandatory, true);
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

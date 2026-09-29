@@ -1,6 +1,6 @@
 # @nest-native/messaging
 
-<p align="center">Transactional outbox + idempotent inbox for NestJS — persisted with Drizzle ORM (SQLite, Postgres &amp; MySQL), delivered in-process or over Kafka.</p>
+<p align="center">Transactional outbox + idempotent inbox for NestJS — persisted with Drizzle ORM (SQLite, Postgres &amp; MySQL), delivered in-process, over Kafka, or over RabbitMQ.</p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@nest-native/messaging"><img src="https://img.shields.io/npm/v/@nest-native/messaging.svg" alt="NPM Version" /></a>
@@ -11,7 +11,7 @@
 </p>
 
 > [!NOTE]
-> **v0.x — early but stable.** The public API (the producer, claimer, inbox, transport seam, and the Drizzle stores) is implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are supported, with in-process (no broker) and Kafka transports.
+> **v0.x — early but stable.** The public API (the producer, claimer, inbox, transport seam, and the Drizzle stores) is implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are supported, with in-process (no broker), Kafka, and RabbitMQ transports.
 
 ## The problem it solves
 
@@ -22,7 +22,7 @@
 - **Transactional outbox (producer):** `enqueue()` writes the event into an `outbox_events` row **inside your business transaction** (via [`@nestjs-cls/transactional`](https://www.npmjs.com/package/@nestjs-cls/transactional)). A background **claimer** then relays committed rows to the broker — at-least-once, with retry/backoff.
 - **Idempotent inbox (consumer):** `runOnce()` dedups redeliveries via a unique `(source, message_key)` row written **in the same transaction as the side effect**, yielding **effective exactly-once** processing.
 
-It is **not** a generic multi-broker abstraction — it is the outbox/inbox pattern, done natively for the Drizzle + Kafka + NestJS stack.
+It is **not** a generic multi-broker abstraction — it is the outbox/inbox pattern, done natively for the Drizzle + NestJS stack, delivered over Kafka or RabbitMQ.
 
 ## Install
 
@@ -31,6 +31,7 @@ npm install @nest-native/messaging
 # plus your driver + transport (peers):
 npm install drizzle-orm @nestjs-cls/transactional better-sqlite3   # or pg / mysql2
 npm install @nest-native/kafka                                     # only for the Kafka transport
+npm install amqplib                                                # only for the RabbitMQ transport
 ```
 
 ## Entry points
@@ -43,12 +44,13 @@ npm install @nest-native/kafka                                     # only for th
 | `@nest-native/messaging/postgres` | node-postgres (async) stores + table factories |
 | `@nest-native/messaging/mysql` | mysql2 (async) stores + table factories |
 | `@nest-native/messaging/kafka` | `KafkaOutboxTransport` + the idempotent `@KafkaConsumer` base, over `@nest-native/kafka` |
+| `@nest-native/messaging/rabbitmq` | `RabbitOutboxTransport` (confirm channel, `mandatory` publishes) + `RabbitInboxConsumer`, over your `amqplib` connection |
 | `@nest-native/messaging/testing` | in-memory transport + harness for broker-free tests |
 
 ## Status & scope
 
 - **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
-- **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer) and Kafka (`@nest-native/kafka`).
+- **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and RabbitMQ (`amqplib`) — see [RabbitMQ](website/docs/rabbitmq.md).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
 ## Compatibility
@@ -61,6 +63,7 @@ npm install @nest-native/kafka                                     # only for th
 | `@nestjs-cls/transactional` | `^3.0.0` — on NestJS 12, `3.3+` (with `nestjs-cls` `6.3+`): the first releases whose own peer ranges admit 12 |
 | `better-sqlite3` | `^11.0.0 \|\| ^12.0.0 \|\| ^13.0.0` |
 | `@nest-native/kafka` | `^0.2.0 \|\| ^0.3.0 \|\| ^0.4.0 \|\| ^0.5.0 \|\| ^0.6.0` — on NestJS 12, `0.5.1+`: the first release whose peer range admits 12 |
+| `amqplib` | `^2.0.0` (RabbitMQ 4, optional) |
 
 Both ends of the NestJS range are tested, not assumed: the default lockfile
 keeps the suite on an 11.x in the middle of the range, and the `nestjs-compat`
@@ -101,12 +104,16 @@ to rerun that leg locally, start from a clean worktree or
 `rm -rf node_modules package-lock.json` first (the exact command is in
 `.github/workflows/ci.yml`).
 
-Two **optional, local-only** layers sit on top (neither runs in CI, and forks
-work without them):
+A dedicated `integration` job runs the gated real-backend specs — the MySQL
+and PostgreSQL round-trips and the RabbitMQ transport and inbox — against
+service containers on every PR, and fails if any of them skipped, so a
+missing backend can never pass as green.
 
-- **Full mode** — `npm run infra:up && npm run test:full` runs the gated
-  MySQL/PostgreSQL round-trip specs against disposable Docker containers
-  (`compose.yaml`); `npm run infra:down` cleans up.
+Two **optional, local-only** layers sit on top (forks work without them):
+
+- **Full mode** — `npm run infra:up && npm run test:full` runs those same
+  gated specs against disposable Docker containers (`compose.yaml`) on your
+  machine; `npm run infra:down` cleans up.
 - **Mutation testing** — `npm run test:mutation` (incremental Stryker run;
   `test:mutation:full` re-tests everything). Scope with `STRYKER_MUTATE`,
   include the gated I/O specs with `STRYKER_WITH_INFRA=1`.

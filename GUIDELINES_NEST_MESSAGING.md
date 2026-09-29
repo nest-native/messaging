@@ -17,8 +17,10 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   outside their transactions — safe on sync and async drivers alike. This is the
   generalization of the reference-app's sqlite-only synchronous casts.
 - **Transport seam.** The claimer publishes through `OutboxTransport`; the
-  in-process default and the `@nest-native/messaging/kafka` adapter implement it.
-  The core never imports a broker client.
+  in-process default and the `@nest-native/messaging/kafka` and
+  `@nest-native/messaging/rabbitmq` adapters implement it. The core never imports
+  a broker client; the RabbitMQ adapter imports only amqplib's *types* and runs on
+  the application's own connection.
 - Support line: Node `>=22` (`>=22.12` on the NestJS 12 end — see section 3),
   NestJS `^11.0.0 || ^12.0.0`, Drizzle `0.44`/`0.45`,
   `@nestjs-cls/transactional` `3.x`, `better-sqlite3` `11.x`/`12.x`/`13.x`.
@@ -121,17 +123,62 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
 - `InboxService.runOnce(messageKey, source, handler)` → `'processed' | 'duplicate'`.
 - Exported per-dialect schema factories for `outbox_events` / `inbox_events`;
   consumers add them to their schema and generate migrations with drizzle-kit.
-- Subpaths: `.` (core), `./kafka`, `./testing`.
+- Subpaths: `.` (core), `./in-process`, `./kafka`, `./rabbitmq`, `./testing`,
+  and the dialect stores `./sqlite`, `./postgres`, `./mysql`.
 
 ### 3. Implementation rules
 - The published `packages/messaging/package.json` keeps an explicit empty
   `"dependencies": {}` block; runtime integrations are `peerDependencies`
-  (`better-sqlite3`, `pg`, `@nest-native/kafka` optional).
+  (`better-sqlite3`, `pg`, `mysql2`, `@nest-native/kafka` and `amqplib` optional).
 - **Side-effect rule:** `runOnce`'s handler runs inside the dedup transaction — on
   the sqlite store it must be **synchronous + DB-only**; on Postgres an async
   DB-only handler is fine. Document this on every public surface.
-- Keep the wire contract a single in-package source of truth shared by the Kafka
-  transport and the inbox consumer.
+- Keep the wire contract a single in-package source of truth shared by both
+  broker transports (Kafka, RabbitMQ) and their inbox consumers.
+- **A transport throws plain `Error`s for broker failures, never
+  `RetryableError`.** The claimer retries a `RetryableError` with no attempt
+  limit, and a plain error with backoff until `maxAttempts` before marking the
+  row failed. A broker transport's failures — an outage, a nack, an unroutable
+  message — must end in a failed row if they never clear, so they are plain
+  errors (the Kafka transport lets `send()` failures through untouched; the
+  RabbitMQ transport wraps each with its reason). `RetryableError` is for a
+  transport that knows a *specific* retry-after, and `PermanentError` for a
+  message that can never be delivered.
+- **RabbitMQ: a publish is done only when acked AND not returned.** The
+  RabbitMQ transport publishes `mandatory` on a confirm channel: without
+  `mandatory`, RabbitMQ acks a message no queue is bound for and drops it, and
+  the outbox row would be marked processed for an event nobody receives. The
+  broker sends the return before the ack of the same publish — RabbitMQ
+  documents that ordering for publisher confirms, and the gated spec (CI's
+  `integration` job runs it on every PR) checks it against a real RabbitMQ 4
+  broker, because the bookkeeping is only correct while it holds; do not
+  change the return/ack bookkeeping without that spec staying green. amqplib's
+  recovering connection survives a broker restart but its channels do not,
+  which is why the transport reopens its channel lazily and bounds every
+  publish with `confirmTimeoutMs`.
+- **RabbitMQ consumer: settle safely, back off, and never lose a dead letter.**
+  Three rules came out of the adversarial review of the first cut, each
+  measured on RabbitMQ 4 and pinned by a gated spec. `RabbitInboxConsumer.consume`
+  never rejects: amqplib throws from `ack`/`nack` once the channel has closed,
+  and a rejection from a `void`-called consume would crash the process, so a
+  settle that fails is logged and the broker's own redelivery (deduplicated) is
+  the recovery. A transient failure is requeued only after a backoff (1 s,
+  doubling to 30 s, per message; optional `maxAttempts` dead-letters it): an
+  explicit requeue goes back to the head of the queue and is **not** counted
+  toward a quorum queue's delivery limit, so an immediate requeue redelivered
+  the same message about 1 400 times a second, forever. And a dead-letter copy
+  is published `mandatory` like the outbox's own publishes — otherwise an
+  unbound dead-letter exchange acks the copy and drops it, and the original,
+  acked next, is lost. Do not reintroduce an immediate requeue, an unguarded
+  settle, or a non-mandatory dead-letter publish.
+- **A dedup key must name exactly one message.** amqplib decodes a 64-bit
+  integer header through a JavaScript number, so two ids past 2^53 can arrive
+  as the same value — and a shared key acks the second event as a duplicate,
+  unprocessed. The RabbitMQ consumer therefore reads an integer header as a key
+  only while `Number.isSafeInteger` holds, and otherwise falls through to the
+  next id in the wire contract or dead-letters with that reason. Any new way
+  of turning a header into a key keeps that rule: a lossy conversion is never
+  a key.
 - **NestJS 12 is ESM-only: never import a directory index from `@nestjs/*`.**
   `@nestjs/common` and `@nestjs/core` 12 ship an exports map of
   `{".", "./internal", "./*.js", "./*": "./*.js"}`. A deep import of a *file*
@@ -179,8 +226,23 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   Kafka consumer base.
 - 100% test coverage (branches/functions/lines/statements) on the core package;
   SonarJS cognitive complexity ≤ 15 per function.
-- Tests cover both dialects (sqlite + pg) and the Kafka path via the in-memory
-  broker; a gated real-broker e2e proves exactly-once under redelivery.
+- Tests cover every dialect (sqlite, pg, mysql) and the Kafka path via the
+  in-memory broker; gated real-service specs prove the round-trip on MySQL and
+  Postgres, and on RabbitMQ: exactly-once under redelivery, unroutable and
+  missing-exchange publishes, requeue, both dead-letter paths, and a
+  broker-side connection close. Those specs run on every PR in CI's
+  `integration` job, against the same images `compose.yaml` runs locally.
+- **Every backend the docs claim runs for real in CI, and a skip is a
+  failure.** The gated specs skip themselves when their URL is unset so a fork
+  or a laptop without Docker stays green — and that same skip turns a broken CI
+  wiring into a pass. CI therefore runs them through
+  `test:integration:strict` (`scripts/run-integration-strict.mjs`), which
+  requires a non-empty run with no `# SKIP` or `# TODO` marker at all. The
+  marker scan is load-bearing: Node's test runner prints `ℹ skipped 0` even
+  when an entire `describe(..., { skip })` block was skipped, because a
+  skipped suite is not a skipped test, so the summary alone passes a run in
+  which every backend was missing. A new backend or a new gated spec lands
+  with its service in the `integration` job in the same PR.
 
 ### 5. Security Review Requirements (MANDATORY)
 - Every PR includes an explicit supply-chain + application-security pass.
@@ -215,28 +277,35 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
 
 ## Local Full-Mode Verification (optional infra + mutation testing)
 
-Everything in this section is **opt-in and local-only**. Plain `npm test` and
-CI run without Docker and skip the gated specs; forks work out of the box.
-**CI never runs mutation testing** — it is an on-demand, local-only gate.
+Plain `npm test` runs without Docker and skips the gated specs, so forks work
+out of the box. CI's `integration` job runs the gated specs against real
+service containers on every PR (see section 4); the compose flow below is the
+same check on your machine. **CI never runs mutation testing** — it is an
+on-demand, local-only gate.
 
-### Gated I/O specs (real MySQL / PostgreSQL)
+### Gated I/O specs (real MySQL / PostgreSQL / RabbitMQ)
 
 - `npm run infra:up` — disposable containers from `compose.yaml`
-  (MySQL on `127.0.0.1:33062`, PostgreSQL on `127.0.0.1:54322`). Needs Docker.
+  (MySQL on `127.0.0.1:33062`, PostgreSQL on `127.0.0.1:54322`, RabbitMQ 4 on
+  `127.0.0.1:56720` with its management API on `127.0.0.1:15670`). Needs Docker.
 - `npm run test:full` — the hermetic suite plus the gated round-trip specs
-  against those containers (`MESSAGING_MYSQL_URL` /
-  `MESSAGING_POSTGRES_URL` are set inline to the compose URLs). Each
-  dialect's block skips independently when its URL is missing.
+  against those containers (`MESSAGING_MYSQL_URL`, `MESSAGING_POSTGRES_URL`,
+  `MESSAGING_RABBITMQ_URL` and `MESSAGING_RABBITMQ_MANAGEMENT_URL` are set
+  inline to the compose URLs). Each block skips independently when its URL is
+  missing. Test queues must be durable: RabbitMQ 4 refuses a transient shared
+  queue by closing the whole connection.
 - `npm run infra:down` — removes containers and volumes.
-- Using your own databases instead: export those two env vars (either or
-  both) and run `npm run test:integration` — the specs gate purely on the
-  env vars.
+- Using your own services instead: export any of those env vars and run
+  `npm run test:integration` — the specs gate purely on the env vars. With all
+  four set, `npm run test:integration:strict` is exactly CI's check: it fails
+  if anything skipped.
 
 **AI agents working on this repo**: when Docker is available, run
 `npm run infra:up && npm run test:full` before opening a PR that touches
-package source, and report the result (including the gated specs) in the PR
-body. When Docker is not available, run `npm test` and state that the gated
-specs were skipped. Never wire any of this into CI.
+package source; CI's `integration` job runs the same specs, so the PR body
+needs only a result CI cannot show. When Docker is not available, run
+`npm test` and let the `integration` job prove the gated specs. Mutation
+testing stays out of CI.
 
 ### Mutation testing (Stryker — occasional targeted audit, local only, never in CI)
 
@@ -262,4 +331,5 @@ every mutant against the whole suite and are slow to impractical — lean on
 scoped runs plus hand-verification, and `kill -9` any leftover `stryker`
 processes after a timeout. Treat survivors by the doctrine (add a test /
 simplify redundant code / `// Stryker disable` a true equivalent / assert bounds
-for timing). Keep CI fast and Docker-free — that is a deliberate contract.
+for timing). Keep CI's unit path fast and Docker-free — that is a deliberate
+contract; real services live only in the `integration` job.

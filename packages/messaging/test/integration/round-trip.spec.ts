@@ -18,9 +18,10 @@ import {
 } from '../../dialects/postgres';
 
 // Gated end-to-end tests against a REAL database. They skip unless the matching
-// URL env var is set, so `npm test` / `test:cov` stay hermetic and 100%. Run them
-// locally via `npm run infra:up && npm run test:full` (see the "Local full-mode
-// verification" section in GUIDELINES_NEST_MESSAGING.md); CI does not run them.
+// URL env var is set, so `npm test` / `test:cov` stay hermetic and 100%. CI's
+// `integration` job runs them through `test:integration:strict`, which fails if
+// any of them skipped; locally, `npm run infra:up && npm run test:full` (see the
+// "Local full-mode verification" section in GUIDELINES_NEST_MESSAGING.md).
 // The stores are driven directly (no Nest) — a genuine produce -> claim ->
 // complete -> inbox-dedup round-trip that exercises the real driver: JSON
 // payloads, errno 1062 unique violations, and async transactions in `claimBatch`.

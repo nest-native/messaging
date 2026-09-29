@@ -21,7 +21,8 @@ import { RetryableError } from '@nest-native/messaging';
 
 const transport = new InMemoryOutboxTransport();
 
-// Register it where production would register KafkaOutboxTransport:
+// Register it where production would register a broker transport
+// (KafkaOutboxTransport, RabbitOutboxTransport):
 // MessagingModule.forRoot({ ..., transport })
 
 // After running the claimer:
@@ -98,5 +99,5 @@ writing a file) would not roll back if the transaction aborts, breaking the
 exactly-once guarantee. Do that work outside `runOnce` — for instance by
 enqueuing another outbox event from within the handler's transaction.
 
-The same rule applies to the `sideEffect` you pass to `KafkaInboxConsumer.consume`,
-which is wrapped into `runOnce` for you.
+The same rule applies to the `sideEffect` you pass to `KafkaInboxConsumer.consume`
+or `RabbitInboxConsumer.consume`, which is wrapped into `runOnce` for you.

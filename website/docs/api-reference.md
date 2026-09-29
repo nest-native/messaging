@@ -402,6 +402,83 @@ Also exported from `/kafka`: `deriveDedupKey` (throws `PermanentError` when a
 message has no usable key), `actionForOutcome`, `actionForError`, and the
 `ConsumerAction` type.
 
+## `@nest-native/messaging/rabbitmq`
+
+Requires the optional `amqplib` peer (`^2.0.0`); the entry point imports only
+its types. See [RabbitMQ](rabbitmq.md) for wiring and semantics.
+
+### `RabbitOutboxTransport`
+
+```ts
+class RabbitOutboxTransport implements OutboxTransport {
+  constructor(options: RabbitOutboxTransportOptions);
+  publish(message: OutboxMessage): Promise<void>;
+  close(): Promise<void>;                  // closes its channel, not the connection
+}
+
+interface RabbitOutboxTransportOptions {
+  connection: RabbitConfirmChannelSource;  // amqplib ChannelModel or RecoveringChannelModel
+  exchange: string;                        // routing key = routingKeyPrefix + topic
+  routingKeyPrefix?: string;
+  confirmTimeoutMs?: number;               // default 10_000
+}
+```
+
+Publishes persistent JSON on a confirm channel, `mandatory`, with `messageId`,
+`x-event-id` and `x-idempotency-key` set. Resolves only when the broker acked
+the message and did not return it; a return, a nack, a closed channel, or a
+timeout is thrown as a plain `Error`, so the claimer retries it until
+`maxAttempts`.
+
+### `RabbitInboxConsumer`
+
+Injectable. Call `consume` from your `channel.consume` callback (manual acks).
+
+```ts
+class RabbitInboxConsumer {
+  consume<T>(options: RabbitConsumeOptions<T>): Promise<RabbitConsumeResult>; // never rejects
+}
+
+interface RabbitConsumeOptions<T> {
+  source: string;                                  // scopes dedup keys (e.g. the queue)
+  channel: Channel;                                // ack/nack go here
+  message: ConsumeMessage;
+  validate: (payload: unknown) => payload is T;    // false or a throw -> dead-letter
+  sideEffect: (payload: T, dedupKey: string) => void | Promise<void>;
+  deadLetter?: { channel: ConfirmChannel; exchange: string; routingKey: string };
+  retry?: RabbitRetryOptions;
+}
+
+interface RabbitRetryOptions {
+  delayMs?: number;      // wait before the first requeue; doubles per failed attempt. Default 1000
+  maxDelayMs?: number;   // cap on that wait. Default 30000
+  maxAttempts?: number;  // dead-letter after this many failures (per process). Default: never
+}
+
+interface RabbitConsumeResult {
+  outcome: 'processed' | 'duplicate' | 'dead-lettered' | 'requeued';
+  dedupKey?: string;  // on every outcome once derived; absent only when the message has no key
+}
+
+const X_DEAD_LETTER_ID = 'x-dead-letter-id'; // matches a returned dead-letter copy to its publish
+```
+
+Processed and duplicate deliveries are acked. A `PermanentError` (no dedup key,
+a body that is not JSON, a payload `validate` rejects or throws on) is
+republished to `deadLetter` — `mandatory`, with an `x-error` header of at most
+1 000 characters — and the original acked once the broker confirms the copy; if
+the copy fails or comes back unroutable, the original is requeued instead,
+after the same backoff as a transient failure. With no `deadLetter` it is
+rejected without requeue. An integer header is a dedup key only while it is
+exact: amqplib rounds a 64-bit integer beyond 2^53, so such a value is never a
+key. Any other error is `nack`ed with requeue after a
+backoff, or dead-lettered once `retry.maxAttempts` is reached. A channel that
+closed before the delivery could be settled is logged, not thrown: the broker
+redelivers the delivery.
+
+`deriveDedupKey`, `actionForOutcome`, `actionForError` and `ConsumerAction` are
+the same helpers `/kafka` exports.
+
 ## `@nest-native/messaging/testing`
 
 ### `InMemoryOutboxTransport`

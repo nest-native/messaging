@@ -18,11 +18,13 @@ npm install @nest-native/messaging
 npm install drizzle-orm @nestjs-cls/transactional @nestjs-cls/transactional-adapter-drizzle-orm nestjs-cls better-sqlite3
 # for the Kafka transport + consumer:
 npm install @nest-native/kafka
+# or, for the RabbitMQ transport + consumer:
+npm install amqplib
 ```
 
 The published package declares **zero runtime dependencies** — Nest, Drizzle,
-your driver, and the optional Kafka client are peer dependencies you already
-control.
+your driver, and the optional Kafka and RabbitMQ clients are peer dependencies
+you already control.
 
 ## 2. Add the table factories to your schema
 
@@ -125,8 +127,8 @@ The `transport` is the only piece that differs between environments: the
 in-memory transport (`@nest-native/messaging/testing`, used above) for tests,
 `InProcessOutboxTransport` (`@nest-native/messaging/in-process`) when your
 consumers live in the same process — the no-broker default profile the
-[`00-showcase` sample](./samples.md) runs — or the Kafka transport for a real
-broker, see [step 7](#7-relay-to-kafka-in-production).
+[`00-showcase` sample](./samples.md) runs — or a broker transport: Kafka, see
+[step 7](#7-relay-to-kafka-in-production), or [RabbitMQ](./rabbitmq.md).
 
 ## 5. Enqueue inside your transaction
 
@@ -214,6 +216,10 @@ MessagingModule.forRootAsync({
     new KafkaOutboxTransport(producer),
 });
 ```
+
+On RabbitMQ, bind `RabbitOutboxTransport` the same way and consume with
+`RabbitInboxConsumer` in place of the Kafka consumer below; the
+[RabbitMQ page](./rabbitmq.md) covers both, with the topology they expect.
 
 ## 8. Consume exactly-once
 

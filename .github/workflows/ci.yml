@@ -353,6 +353,75 @@ jobs:
         # this repository has.
         run: node scripts/write-sample-summary.mjs "$(cat sample-validation-duration-ms.txt)" >> "$GITHUB_STEP_SUMMARY"
 
+  integration:
+    name: Real-backend integration (PostgreSQL, MySQL, RabbitMQ)
+    runs-on: ubuntu-latest
+    # A broker operation on a dead connection can wait forever; fail instead.
+    timeout-minutes: 15
+    # The gated specs (packages/messaging/test/integration) against real
+    # services, from the same images compose.yaml runs locally. The specs skip
+    # when their backend URL is unset so forks stay green — which is why this
+    # job runs them through test:integration:strict: it fails if any spec or
+    # suite did not run, so a wiring mistake here cannot pass as green.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: messaging
+          POSTGRES_PASSWORD: messaging
+          POSTGRES_DB: messaging
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U messaging -d messaging"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: messaging
+          MYSQL_DATABASE: messaging
+          MYSQL_USER: messaging
+          MYSQL_PASSWORD: messaging
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pmessaging"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 60
+      rabbitmq:
+        image: rabbitmq:4-management
+        env:
+          RABBITMQ_DEFAULT_USER: messaging
+          RABBITMQ_DEFAULT_PASS: messaging
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the gated specs against the real services
+        env:
+          MESSAGING_POSTGRES_URL: postgres://messaging:messaging@127.0.0.1:5432/messaging
+          MESSAGING_MYSQL_URL: mysql://messaging:messaging@127.0.0.1:3306/messaging
+          MESSAGING_RABBITMQ_URL: amqp://messaging:messaging@127.0.0.1:5672
+          MESSAGING_RABBITMQ_MANAGEMENT_URL: http://messaging:messaging@127.0.0.1:15672
+        run: npm run test:integration:strict
+
   docs-site:
     name: Docusaurus build
     runs-on: ubuntu-latest

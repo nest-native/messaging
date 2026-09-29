@@ -8,6 +8,54 @@ package release is useful for users.
 
 ## Unreleased
 
+- **RabbitMQ transport: `@nest-native/messaging/rabbitmq`.** A
+  `RabbitOutboxTransport` that relays the outbox over RabbitMQ and a
+  `RabbitInboxConsumer` that runs the idempotent inbox on RabbitMQ deliveries,
+  over the application's own `amqplib` 2 connection (`amqplib` is a new
+  optional peer; the entry point imports only its types). A publish counts as
+  done only when the broker acked it on a confirm channel and did not return
+  it — every message is published `mandatory`, because RabbitMQ otherwise acks
+  and drops a message no queue is bound for. Broker failures are plain errors,
+  retried by the claimer until `maxAttempts`, the same budget as Kafka. The
+  consumer acks processed and duplicate deliveries, requeues transient
+  failures, and dead-letters poison either by republishing it with an
+  `x-error` header or by rejecting it into the queue's own dead-letter
+  exchange. The consumer never rejects (a channel that closed before the ack
+  leaves the delivery with the broker, which redelivers it), requeues a
+  transient failure only after a backoff (1 s doubling to 30 s per message,
+  with an optional `maxAttempts` that dead-letters it — RabbitMQ 4 does not
+  count an explicit requeue toward a quorum queue's delivery limit, and an
+  immediate requeue spun at about 1 400 redeliveries a second), publishes its
+  dead-letter copies `mandatory` so an unbound dead-letter exchange cannot
+  swallow one, backs off on a dead-letter target that keeps failing, bounds
+  the `x-error` reason to 1 000 characters, listens for `error` on the
+  dead-letter channel so a broker-closed one cannot close the connection,
+  treats a `validate` that throws as poison, reads exact integer header values
+  as keys — never a 64-bit id amqplib rounded past 2^53, which could make two
+  events one — and reports the dedup key on every outcome. The transport
+  carries the broker's reason when it closes the channel, lets publishes
+  already under way and outstanding confirms settle before `close()` closes
+  it, and never waits in `close()` for a channel that is still opening.
+  Verified against a real RabbitMQ 4 broker by a new gated spec, which CI
+  runs on every PR (below). The broker-neutral
+  consumer helpers (`deriveDedupKey`, `actionForError`, …) are now shared by
+  both adapters and exported from `/rabbitmq` as well as `/kafka`.
+  See the new RabbitMQ docs page.
+
+- **CI runs every gated real-backend spec, and a skip fails the build.** A new
+  `integration` job runs the MySQL and PostgreSQL round-trips and the RabbitMQ
+  transport and inbox specs against service containers built from the same
+  images `compose.yaml` uses locally. Until now those specs only ran when
+  someone ran `test:full` by hand, so the claims they back — the RabbitMQ
+  return-before-ack ordering among them — were never checked on a PR. The job
+  runs them through the new `test:integration:strict`, which fails unless the
+  run is non-empty and has no `# SKIP` or `# TODO` marker: the specs skip
+  themselves when their URL is unset, and Node's summary prints `skipped 0`
+  even when a whole suite was skipped, so neither a green exit nor the summary
+  proves anything ran. It reads a TAP copy of the run, because the spec
+  reporter prints a skip's reason in place of the word SKIP. `test:mutant:full` now also passes the RabbitMQ URLs,
+  so `STRYKER_WITH_INFRA=1` runs the RabbitMQ specs too.
+
 - **`@nest-native/kafka` 0.6.x is now an allowed peer**
   (`^0.2.0 || ^0.3.0 || ^0.4.0 || ^0.5.0 || ^0.6.0`). Under 0.x caret rules
   the range excluded 0.6.0, so an application installing this package next to
