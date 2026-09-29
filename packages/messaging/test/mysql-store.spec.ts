@@ -70,7 +70,11 @@ function outboxMock(options: OutboxMockOptions = {}) {
         if (projection) {
           captured.projection = projection;
           captured.candidatesWhere = condition;
-          return { limit: () => Promise.resolve(options.candidates ?? []) };
+          return {
+            limit: () => ({
+              for: () => Promise.resolve(options.candidates ?? []),
+            }),
+          };
         }
         return Promise.resolve(selectRows);
       },
