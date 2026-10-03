@@ -70,7 +70,11 @@ function outboxMock(options: OutboxMockOptions = {}) {
         if (projection) {
           captured.projection = projection;
           captured.candidatesWhere = condition;
-          return { limit: () => Promise.resolve(options.candidates ?? []) };
+          return {
+            limit: () => ({
+              for: () => Promise.resolve(options.candidates ?? []),
+            }),
+          };
         }
         return Promise.resolve(selectRows);
       },
@@ -179,7 +183,7 @@ describe('MysqlOutboxStore', () => {
 
   test('markCompleted transitions the row to completed', async () => {
     const { db, captured } = outboxMock();
-    await store.markCompleted(db, 'id-1');
+    await store.markCompleted(db, 'id-1', 'worker-1');
     assert.equal(captured.set?.status, 'completed');
     assert.equal(captured.set?.lastError, null);
     assert.ok(typeof captured.set?.processedAt === 'string');
@@ -188,7 +192,7 @@ describe('MysqlOutboxStore', () => {
   test('retry re-arms the row, carrying or clearing lastError', async () => {
     const withError = outboxMock();
     const before = Date.now();
-    await store.retry(withError.db, 'id-1', 5_000, 'boom');
+    await store.retry(withError.db, 'id-1', 5_000, 'boom', 'worker-1');
     assert.equal(withError.captured.set?.status, 'pending');
     assert.equal(withError.captured.set?.lastError, 'boom');
     assert.equal(withError.captured.set?.claimedAt, null);
@@ -200,13 +204,13 @@ describe('MysqlOutboxStore', () => {
     assert.match(render(withError.captured.set?.attempts).sql, /`attempts` \+ 1/);
 
     const noError = outboxMock();
-    await store.retry(noError.db, 'id-1', 1_000);
+    await store.retry(noError.db, 'id-1', 1_000, undefined, 'worker-1');
     assert.equal(noError.captured.set?.lastError, null);
   });
 
   test('markFailed records the reason and increments attempts', async () => {
     const { db, captured } = outboxMock();
-    await store.markFailed(db, 'id-1', 'dead');
+    await store.markFailed(db, 'id-1', 'dead', 'worker-1');
     assert.equal(captured.set?.status, 'failed');
     assert.equal(captured.set?.lastError, 'dead');
     assert.ok(typeof captured.set?.processedAt === 'string');

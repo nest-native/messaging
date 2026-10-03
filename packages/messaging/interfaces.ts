@@ -87,9 +87,9 @@ export type RunOnceOutcome = 'processed' | 'duplicate';
 export interface OutboxStore {
   enqueue(db: unknown, input: EnqueueInput<object>): OutboxEventRow | Promise<OutboxEventRow>;
   claimBatch(db: unknown, cfg: ResolvedClaimerConfig): Promise<OutboxEventRow[]>;
-  markCompleted(db: unknown, id: string): Promise<void>;
-  retry(db: unknown, id: string, delayMs: number, lastError?: string): Promise<void>;
-  markFailed(db: unknown, id: string, reason: string): Promise<void>;
+  markCompleted(db: unknown, id: string, claimedBy: string): Promise<void>;
+  retry(db: unknown, id: string, delayMs: number, lastError: string | undefined, claimedBy: string): Promise<void>;
+  markFailed(db: unknown, id: string, reason: string, claimedBy: string): Promise<void>;
 }
 
 /**

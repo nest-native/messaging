@@ -74,7 +74,7 @@ export class OutboxClaimer {
         payload: event.payload,
         idempotencyKey: event.idempotencyKey ?? undefined,
       });
-      await this.store.markCompleted(this.db, event.id);
+      await this.store.markCompleted(this.db, event.id, cfg.workerInstanceId);
       return 'completed';
     } catch (error) {
       return this.onPublishError(event, cfg, error);
@@ -89,30 +89,35 @@ export class OutboxClaimer {
     const message = error instanceof Error ? error.message : String(error);
     // Permanent: retrying can never succeed — fail now instead of burning attempts.
     if (error instanceof PermanentError) {
-      return this.fail(event, message);
+      return this.fail(event, cfg, message);
     }
     // Retryable: schedule another attempt, honouring a transport-supplied delay.
     if (error instanceof RetryableError) {
       const delay = error.delayMs ?? this.backoff(event.attempts, cfg);
-      await this.store.retry(this.db, event.id, delay, message);
+      await this.store.retry(this.db, event.id, delay, message, cfg.workerInstanceId);
       return 'retried';
     }
     // Anything else: retry with backoff until maxAttempts, then fail.
     if (event.attempts + 1 >= event.maxAttempts) {
-      return this.fail(event, message);
+      return this.fail(event, cfg, message);
     }
     await this.store.retry(
       this.db,
       event.id,
       this.backoff(event.attempts, cfg),
       message,
+      cfg.workerInstanceId,
     );
     return 'retried';
   }
 
-  private async fail(event: OutboxEventRow, reason: string): Promise<'failed'> {
+  private async fail(
+    event: OutboxEventRow,
+    cfg: ResolvedClaimerConfig,
+    reason: string,
+  ): Promise<'failed'> {
     this.logger.warn(`outbox event ${event.id} failed: ${reason}`);
-    await this.store.markFailed(this.db, event.id, reason);
+    await this.store.markFailed(this.db, event.id, reason, cfg.workerInstanceId);
     return 'failed';
   }
 

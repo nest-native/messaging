@@ -85,29 +85,45 @@ describe('PostgresOutboxStore', () => {
     assert.equal(reclaimed[0]?.claimedBy, cfg.workerInstanceId);
   });
 
-  test('markCompleted / retry / markFailed transition the row', async () => {
-    const row = await store.enqueue(db, { topic: 't', payload: {} });
-    await store.markCompleted(db, row.id);
-    assert.equal((await fetch(row.id))?.status, 'completed');
+  test('markCompleted transitions the row', async () => {
+    await store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
+    await store.markCompleted(db, claimed!.id, cfg.workerInstanceId);
+    assert.equal((await fetch(claimed!.id))?.status, 'completed');
+  });
 
+  test('retry transitions the row and schedules next attempt', async () => {
+    await store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
     const before = Date.now();
-    await store.retry(db, row.id, 5_000, 'boom');
-    let after = await fetch(row.id);
+    await store.retry(db, claimed!.id, 5_000, 'boom', cfg.workerInstanceId);
+    const after = await fetch(claimed!.id);
     assert.equal(after?.status, 'pending');
     assert.equal(after?.attempts, 1);
     assert.equal(after?.lastError, 'boom');
-    // The retry delay pushes availableAt INTO THE FUTURE by delayMs.
     assert.ok(new Date(after!.availableAt).getTime() >= before + 5_000);
+    assert.equal(after?.claimedBy, null);
+  });
 
-    await store.retry(db, row.id, 1_000);
-    after = await fetch(row.id);
-    assert.equal(after?.attempts, 2);
+  test('retry without lastError clears the previous one', async () => {
+    await store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
+    // Due again at once, so the next claim picks it up with 'boom' still set.
+    await store.retry(db, claimed!.id, 0, 'boom', cfg.workerInstanceId);
+    await store.claimBatch(db, cfg);
+    await store.retry(db, claimed!.id, 1_000, undefined, cfg.workerInstanceId);
+    const after = await fetch(claimed!.id);
     assert.equal(after?.lastError, null);
+    assert.equal(after?.attempts, 2);
+  });
 
-    await store.markFailed(db, row.id, 'dead');
-    after = await fetch(row.id);
+  test('markFailed transitions the row', async () => {
+    await store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
+    await store.markFailed(db, claimed!.id, 'dead', cfg.workerInstanceId);
+    const after = await fetch(claimed!.id);
     assert.equal(after?.status, 'failed');
-    assert.equal(after?.attempts, 3);
+    assert.equal(after?.attempts, 1);
   });
 
   async function fetch(id: string) {
