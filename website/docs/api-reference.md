@@ -51,11 +51,20 @@ class OutboxClaimer {
   tick(overrides?: ClaimerConfig): Promise<TickReport>;
 }
 
+interface ClaimerConfig {        // every field optional
+  workerInstanceId?: string;     // claim owner; default `${hostname}-${pid}`
+  stuckTimeoutMs?: number;       // a claim older than this is taken again; default 60000
+  batchSize?: number;            // rows per claim; default 32
+  baseBackoffMs?: number;        // retry backoff base; default 1000
+  maxBackoffMs?: number;         // retry backoff cap; default 60000
+}
+
 interface TickReport {
   claimed: number;
   completed: number;
   retried: number;
   failed: number;
+  lost: number;                  // let go: the claim expired or was taken over
 }
 
 const DEFAULT_CLAIMER_CONFIG: ResolvedClaimerConfig; // exported
@@ -65,6 +74,40 @@ const DEFAULT_CLAIMER_CONFIG: ResolvedClaimerConfig; // exported
 through the transport, and records the outcome. A publish that throws is mapped
 to a retry/fail decision (see [Transport seam](#transport-seam)). Run it from a
 background worker — never inside a business transaction.
+
+An override set to `undefined` keeps its default, so `{ workerInstanceId:
+process.env.WORKER_ID }` is safe with the variable unset. An invalid value — a
+blank `workerInstanceId`, a `batchSize` below 1, a `stuckTimeoutMs` that is not
+positive, a negative backoff — throws.
+
+**Running several workers.** Any number of workers can drain one outbox:
+
+- **Claims are exclusive.** The Postgres and MySQL stores lock the rows they claim
+  with `FOR UPDATE SKIP LOCKED`, so concurrent claims split the backlog instead
+  of sharing rows; SQLite runs one write transaction at a time.
+- **A stalled claim is taken over.** A row still `processing` after
+  `stuckTimeoutMs` is claimed again by whichever worker gets to it first.
+- **Outcomes are fenced on the claim.** Completing, retrying or failing a row
+  applies only while it is still `processing` under that exact claim
+  (`claimedBy` + `claimedAt`). A worker that stalled past the timeout cannot
+  overwrite the new owner's outcome, even under the same `workerInstanceId`.
+- **A batch held too long is cut short.** Once a batch has been held longer
+  than `stuckTimeoutMs`, its remaining events may already belong to another
+  worker. The worker skips them instead of publishing them a second time. The
+  first event of a batch is always published, so a slow claim still makes
+  progress.
+
+Both cases count as `lost` and log a warning. A steady non-zero `lost` means
+batches take longer than `stuckTimeoutMs`: raise it or lower `batchSize`. Each
+worker stamps and ages claims with its own clock, so keep worker clocks in sync.
+
+If recording a delivery fails — the database errors after a successful
+publish — `tick()` throws. The event stays claimed and is published again once
+its claim goes stale. Retrying it would spend an attempt on an event that was
+already delivered.
+
+`resolveClaimerConfig(overrides)`, also exported, applies the same defaults and
+validation `tick()` does, so a worker can check its config at startup.
 
 ### `runWorkerLoop`
 
@@ -86,7 +129,8 @@ interface WorkerLoopOptions {
 
 Loops `claimer.tick()`: when a tick claims a batch it loops immediately to drain
 the backlog; when it claims nothing it waits `pollIntervalMs`. A throwing tick is
-reported via `onError` and the loop continues.
+reported via `onError` and the loop continues. An invalid `claimer` config
+rejects the returned promise at once, before the first tick.
 
 ### Wake tiers (cutting the idle latency)
 
@@ -218,9 +262,15 @@ you.
 interface OutboxStore {
   enqueue(db: unknown, input: EnqueueInput<object>): OutboxEventRow | Promise<OutboxEventRow>;
   claimBatch(db: unknown, cfg: ResolvedClaimerConfig): Promise<OutboxEventRow[]>;
-  markCompleted(db: unknown, id: string): Promise<void>;
-  retry(db: unknown, id: string, delayMs: number, lastError?: string): Promise<void>;
-  markFailed(db: unknown, id: string, reason: string): Promise<void>;
+  markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean>;
+  retry(db: unknown, claim: OutboxClaim, delayMs: number, lastError?: string): Promise<boolean>;
+  markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean>;
+}
+
+interface OutboxClaim {
+  id: string;
+  claimedBy: string;             // the workerInstanceId the claim wrote
+  claimedAt: string;             // the timestamp the claim wrote
 }
 
 interface InboxStore {
@@ -232,6 +282,14 @@ interface InboxStore {
   ): RunOnceOutcome | Promise<RunOnceOutcome>;
 }
 ```
+
+An outbox store must uphold what the claimer relies on:
+
+- **`claimBatch` is exclusive.** It never returns one row to two concurrent
+  callers, and it stamps every row it returns with `claimedBy` and `claimedAt`.
+- **Transitions are fenced.** Each one writes the row only while it is still
+  `processing` with exactly the claim's `claimedBy` and `claimedAt`. It resolves
+  `true` when it wrote the row and `false` when the claim no longer held it.
 
 Also exported: `OutboxEventRow`, `ResolvedClaimerConfig` / `ClaimerConfig`,
 `OutboxStatus` / `OUTBOX_STATUSES`, `InboxStatus` / `INBOX_STATUSES`, and the DI
@@ -309,8 +367,9 @@ class InProcessOutboxTransport implements OutboxTransport {
   `RetryableError` keeps its delay, anything else retries with backoff until
   `maxAttempts`.
 
-Delivery is **at-least-once** via the claimer (it redelivers after a retry or a
-crash between handler success and `markCompleted`), so handlers must be
+Delivery is **at-least-once** via the claimer (it redelivers after a retry, a
+crash between handler success and `markCompleted`, or a claim that outlived
+`stuckTimeoutMs`), so handlers must be
 idempotent — or wrap their side effect in the inbox. The
 [`00-showcase` sample](./samples.md) runs this profile end to end.
 
@@ -339,7 +398,10 @@ node-postgres (asynchronous) dialect. Same shape as `/sqlite`:
 
 ## `@nest-native/messaging/mysql`
 
-mysql2 (asynchronous) dialect. Same shape as `/postgres`:
+mysql2 (asynchronous) dialect. Same shape as `/postgres`. Needs MySQL 8.0.1 or
+later, for the claim's `FOR UPDATE SKIP LOCKED`, with row-based or mixed binary
+logging (the MySQL 8 default): the claim runs at READ COMMITTED, which InnoDB
+refuses to write under `binlog_format=STATEMENT`.
 
 | Export | Kind | Notes |
 | --- | --- | --- |

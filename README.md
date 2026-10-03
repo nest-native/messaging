@@ -49,7 +49,7 @@ npm install amqplib                                                # only for th
 
 ## Status & scope
 
-- **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
+- **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL 8.0.1+ (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and RabbitMQ (`amqplib`) — see [RabbitMQ](website/docs/rabbitmq.md).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 

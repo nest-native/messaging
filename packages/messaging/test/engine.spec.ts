@@ -21,10 +21,11 @@ import {
   OutboxClaimer,
   OutboxProducer,
   type OutboxEventRow,
+  type OutboxStore,
   PermanentError,
   RetryableError,
 } from '../index';
-import { DEFAULT_CLAIMER_CONFIG } from '../outbox-claimer.service';
+import { DEFAULT_CLAIMER_CONFIG, resolveClaimerConfig } from '../outbox-claimer.service';
 import {
   inboxEvents,
   outboxEvents,
@@ -136,6 +137,23 @@ let transport: InMemoryOutboxTransport;
 const count = (table: string): number =>
   (raw.prepare(`SELECT count(*) c FROM ${table}`).get() as { c: number }).c;
 
+const fetchRow = (id: string) =>
+  db.select().from(outboxEvents).where(eq(outboxEvents.id, id)).get();
+
+/** Records the claimer's Logger warn/error output until `restore()`. */
+function captureLogs(): { warns: string[]; errors: string[]; restore: () => void } {
+  const warns: string[] = [];
+  const errors: string[] = [];
+  Logger.overrideLogger({
+    log: () => {},
+    error: (message: unknown) => errors.push(String(message)),
+    warn: (message: unknown) => warns.push(String(message)),
+    debug: () => {},
+    verbose: () => {},
+  });
+  return { warns, errors, restore: () => Logger.overrideLogger(false) };
+}
+
 async function boot(withInbox = true) {
   raw = new Database(':memory:');
   raw.exec(DDL);
@@ -180,7 +198,7 @@ describe('OutboxClaimer (publish outcomes)', () => {
     const row = await svc.create('gamma');
     const claimer = app.get(OutboxClaimer);
     const report = await claimer.tick();
-    assert.deepEqual(report, { claimed: 1, completed: 1, retried: 0, failed: 0 });
+    assert.deepEqual(report, { claimed: 1, completed: 1, retried: 0, failed: 0, lost: 0 });
     assert.equal(transport.list().length, 1);
     assert.equal(transport.list()[0]?.idempotencyKey, 'widget:gamma');
     const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, row.id)).get();
@@ -315,6 +333,212 @@ describe('OutboxClaimer (publish outcomes)', () => {
       'plain string failure',
     );
   });
+});
+
+describe('OutboxClaimer (claims)', () => {
+  beforeEach(() => boot());
+
+  // Every transition the claimer makes must carry the claim it holds, so each
+  // outcome is driven under a non-default worker id.
+  for (const [name, failure, status] of [
+    ['publishes', undefined, 'completed'],
+    ['retries a RetryableError', new RetryableError('later'), 'pending'],
+    ['retries a generic error', new Error('flaky'), 'pending'],
+    ['fails a PermanentError', new PermanentError('no handler'), 'failed'],
+  ] as const) {
+    test(`a tick under its own workerInstanceId ${name}`, async () => {
+      const row = await app.get(WidgetService).create(name);
+      if (failure) transport.failWith(failure);
+      const report = await app.get(OutboxClaimer).tick({ workerInstanceId: 'pod-7' });
+      assert.equal(report.lost, 0);
+      assert.equal(fetchRow(row.id)?.status, status);
+    });
+  }
+
+  test('an undefined workerInstanceId override keeps the default instead of stranding the row', async () => {
+    // e.g. `{ workerInstanceId: process.env.WORKER_ID }` with the variable
+    // unset. Claiming under no owner left the row processing forever, so it
+    // was republished after every stuck timeout.
+    const row = await app.get(WidgetService).create('unset');
+    const claimer = app.get(OutboxClaimer);
+    const report = await claimer.tick({ workerInstanceId: undefined });
+    assert.deepEqual(report, { claimed: 1, completed: 1, retried: 0, failed: 0, lost: 0 });
+    assert.equal(fetchRow(row.id)?.claimedBy, DEFAULT_CLAIMER_CONFIG.workerInstanceId);
+    assert.equal((await claimer.tick({ workerInstanceId: undefined })).claimed, 0);
+    assert.equal(transport.list().length, 1);
+  });
+
+  // Another worker reclaims the row while this one is publishing it (its claim
+  // outlived stuckTimeoutMs), then the publish settles with `failure`.
+  const reclaimDuringPublish = (failure?: Error) => {
+    transport.publish = (message) => {
+      db.update(outboxEvents)
+        .set({ claimedBy: 'other-worker', claimedAt: new Date(Date.now() + 1).toISOString() })
+        .where(eq(outboxEvents.id, message.id))
+        .run();
+      return failure ? Promise.reject(failure) : Promise.resolve();
+    };
+  };
+
+  for (const [outcome, failure, warning] of [
+    ['completed', undefined, 'was published, but another claim took it over before it was marked completed; the new owner will publish it again'],
+    ['retried', new RetryableError('later'), 'failed to publish (later), but another claim took it over before it was marked retried; leaving it to the new owner'],
+    ['failed', new PermanentError('no handler'), 'failed to publish (no handler), but another claim took it over before it was marked failed; leaving it to the new owner'],
+  ] as const) {
+    test(`a claim taken over mid-publish is reported lost, not ${outcome}`, async () => {
+      const row = await app.get(WidgetService).create(outcome);
+      reclaimDuringPublish(failure);
+      const logs = captureLogs();
+      try {
+        const report = await app.get(OutboxClaimer).tick();
+        assert.deepEqual(report, { claimed: 1, completed: 0, retried: 0, failed: 0, lost: 1 });
+      } finally {
+        logs.restore();
+      }
+      // The new owner's claim is untouched, and nothing claims a failure it did not record.
+      const after = fetchRow(row.id);
+      assert.equal(after?.status, 'processing');
+      assert.equal(after?.claimedBy, 'other-worker');
+      // The publish error is kept even though no row recorded it.
+      assert.deepEqual(logs.warns, [`outbox event ${row.id} ${warning}`]);
+    });
+  }
+
+  test('an event whose claim expired while its batch was publishing is skipped, then delivered once', async () => {
+    const rows = [
+      await app.get(WidgetService).create('slow'),
+      await app.get(WidgetService).create('late'),
+    ];
+    const publish = transport.publish.bind(transport);
+    transport.publish = async (message) => {
+      await publish(message);
+      // Each publish outlasts stuckTimeoutMs, so the next event's claim is
+      // already reclaimable by another worker when its turn comes.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    };
+    const claimer = app.get(OutboxClaimer);
+    const logs = captureLogs();
+    try {
+      const report = await claimer.tick({ stuckTimeoutMs: 50 });
+      assert.deepEqual(report, { claimed: 2, completed: 1, retried: 0, failed: 0, lost: 1 });
+    } finally {
+      logs.restore();
+    }
+    const [published] = transport.list();
+    const skipped = rows.find((r) => r.id !== published?.id)!;
+    assert.equal(fetchRow(published!.id)?.status, 'completed');
+    assert.equal(fetchRow(skipped.id)?.status, 'processing');
+    assert.deepEqual(logs.warns, [
+      `skipped 1 claimed outbox event(s) [${skipped.id}]: the batch was held longer than stuckTimeoutMs (50 ms), so another worker may own them now; raise stuckTimeoutMs or lower batchSize`,
+    ]);
+
+    // Once stuck, the skipped event is reclaimed and published, each event once.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal((await claimer.tick({ stuckTimeoutMs: 50 })).completed, 1);
+    assert.deepEqual(
+      transport.list().map((m) => m.id).sort(),
+      rows.map((r) => r.id).sort(),
+    );
+  });
+
+  test('a claim slower than stuckTimeoutMs still delivers the first event of its batch', async () => {
+    // Ages count from the batch's arrival: measured from the claim stamp, a
+    // slow claim would skip every event and the worker would never progress.
+    await app.get(WidgetService).create('slow-claim');
+    const real = new SqliteOutboxStore();
+    const store: OutboxStore = {
+      enqueue: (handle, input) => real.enqueue(handle, input),
+      claimBatch: async (handle, cfg) => {
+        const rows = await real.claimBatch(handle, cfg);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return rows;
+      },
+      markCompleted: (handle, claim) => real.markCompleted(handle, claim),
+      retry: (handle, claim, delayMs, lastError) => real.retry(handle, claim, delayMs, lastError),
+      markFailed: (handle, claim, reason) => real.markFailed(handle, claim, reason),
+    };
+    const report = await new OutboxClaimer(db, store, transport).tick({ stuckTimeoutMs: 10 });
+    assert.equal(report.completed, 1);
+    assert.equal(transport.list().length, 1);
+  });
+
+  test('failing to record a delivery throws instead of retrying the published event', async () => {
+    // Mapping it to a publish failure burned an attempt, and on the last one
+    // marked a delivered event failed.
+    const row = await app.get(WidgetService).create('unrecorded');
+    const real = new SqliteOutboxStore();
+    const store = {
+      claimBatch: (handle: unknown, cfg: Parameters<OutboxStore['claimBatch']>[1]) =>
+        real.claimBatch(handle, cfg),
+      markCompleted: () => Promise.reject(new Error('database went away')),
+    } as unknown as OutboxStore;
+    await assert.rejects(new OutboxClaimer(db, store, transport).tick(), /database went away/);
+    const after = fetchRow(row.id);
+    assert.equal(after?.status, 'processing');
+    assert.equal(after?.attempts, 0);
+    assert.equal(transport.list().length, 1);
+  });
+
+  test('a row claimBatch returns without its claim stamp is neither published nor transitioned', async () => {
+    const row = new SqliteOutboxStore().enqueue(db, { topic: 't', payload: {} });
+    for (const missing of [{ claimedBy: null }, { claimedAt: null }]) {
+      const unstamped: OutboxEventRow = {
+        ...row,
+        status: 'processing',
+        claimedBy: 'custom-store',
+        claimedAt: new Date().toISOString(),
+        ...missing,
+      };
+      // A store that forgets to stamp: only claimBatch exists, so any
+      // transition call would throw and fail the test.
+      const store = { claimBatch: () => Promise.resolve([unstamped]) } as unknown as OutboxStore;
+      const logs = captureLogs();
+      try {
+        const report = await new OutboxClaimer(db, store, transport).tick();
+        assert.deepEqual(report, { claimed: 1, completed: 0, retried: 0, failed: 0, lost: 1 });
+      } finally {
+        logs.restore();
+      }
+      assert.match(logs.errors[0] ?? '', /without claimedBy\/claimedAt/);
+    }
+    assert.equal(transport.list().length, 0);
+  });
+});
+
+describe('resolveClaimerConfig', () => {
+  test('applies overrides over the defaults; an undefined override keeps the default', () => {
+    assert.deepEqual(resolveClaimerConfig(), DEFAULT_CLAIMER_CONFIG);
+    assert.deepEqual(resolveClaimerConfig({ batchSize: 5, workerInstanceId: undefined }), {
+      ...DEFAULT_CLAIMER_CONFIG,
+      batchSize: 5,
+    });
+    // A plain JavaScript caller may pass null for "no overrides".
+    assert.deepEqual(resolveClaimerConfig(null), DEFAULT_CLAIMER_CONFIG);
+  });
+
+  test('names a string value as a string, as an env-backed config hands it over', () => {
+    assert.throws(
+      () => resolveClaimerConfig({ stuckTimeoutMs: '60000' as unknown as number }),
+      /stuckTimeoutMs must be a positive number of milliseconds within Date's range, got "60000" \(string\)/,
+    );
+  });
+
+  for (const [name, overrides] of [
+    ['an empty workerInstanceId', { workerInstanceId: '' }],
+    ['a blank workerInstanceId', { workerInstanceId: '  ' }],
+    ['a non-string workerInstanceId', { workerInstanceId: 7 as unknown as string }],
+    ['a zero batchSize', { batchSize: 0 }],
+    ['a fractional batchSize', { batchSize: 1.5 }],
+    ['a zero stuckTimeoutMs', { stuckTimeoutMs: 0 }],
+    ['an infinite stuckTimeoutMs', { stuckTimeoutMs: Number.POSITIVE_INFINITY }],
+    ['a stuckTimeoutMs past Date range', { stuckTimeoutMs: Number.MAX_SAFE_INTEGER }],
+    ['a negative baseBackoffMs', { baseBackoffMs: -1 }],
+    ['a NaN maxBackoffMs', { maxBackoffMs: Number.NaN }],
+  ] as const) {
+    test(`rejects ${name}`, () => {
+      assert.throws(() => resolveClaimerConfig(overrides), /^\w+Error: claimer \w+ must be/);
+    });
+  }
 });
 
 describe('InboxService (dedup via the app)', () => {

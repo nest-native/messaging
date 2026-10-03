@@ -139,8 +139,11 @@ jobs:
           git fetch origin ${{ github.base_ref }} --depth=1
           git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'packages/**/*.ts' | tee changed-files.txt
 
+      # The three report steps post PR comments. A fork PR's token is read-only,
+      # so they would fail the job with a 403; the numbers still reach the job
+      # summary below.
       - name: Coverage Report
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v9
         with:
           script: |
@@ -148,7 +151,7 @@ jobs:
             await report({ github, context, core });
 
       - name: Performance Report
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v9
         with:
           script: |
@@ -156,7 +159,7 @@ jobs:
             await report({ github, context, core });
 
       - name: Complexity Report
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v9
         with:
           script: |
