@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { eq } from 'drizzle-orm';
 import { DEFAULT_CLAIMER_CONFIG } from '../outbox-claimer.service';
+import type { OutboxClaim, OutboxEventRow } from '../interfaces';
 import {
   inboxEvents,
   isSqliteUniqueViolation,
@@ -121,48 +122,141 @@ describe('SqliteOutboxStore', () => {
     assert.equal(claimed[0]?.claimedBy, cfg.workerInstanceId);
   });
 
-  test('markCompleted transitions the row', async () => {
+  // The claim the claimer hands back: the row's id plus the stamp claimBatch wrote.
+  const claimOf = (row: OutboxEventRow): OutboxClaim => ({
+    id: row.id,
+    claimedBy: row.claimedBy!,
+    claimedAt: row.claimedAt!,
+  });
+  const fetch = (id: string) =>
+    db.select().from(outboxEvents).where(eq(outboxEvents.id, id)).get();
+  // Ages a claim past stuckTimeoutMs, as if its worker had stalled.
+  const backdate = (id: string) =>
+    db.update(outboxEvents)
+      .set({ claimedAt: new Date(Date.now() - 10_000).toISOString() })
+      .where(eq(outboxEvents.id, id))
+      .run();
+
+  test('markCompleted transitions the row its claim still holds', async () => {
     store.enqueue(db, { topic: 't', payload: {} });
     const [claimed] = await store.claimBatch(db, cfg);
-    await store.markCompleted(db, claimed!.id, cfg.workerInstanceId);
-    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
+    assert.equal(await store.markCompleted(db, claimOf(claimed!)), true);
+    const after = fetch(claimed!.id);
     assert.equal(after?.status, 'completed');
     assert.ok(after?.processedAt);
   });
 
-  test('retry transitions the row', async () => {
+  test('retry re-arms the row and releases the claim', async () => {
     store.enqueue(db, { topic: 't', payload: {} });
     const [claimed] = await store.claimBatch(db, cfg);
     const before = Date.now();
-    await store.retry(db, claimed!.id, 5_000, 'boom', cfg.workerInstanceId);
-    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
+    assert.equal(await store.retry(db, claimOf(claimed!), 5_000, 'boom'), true);
+    const after = fetch(claimed!.id);
     assert.equal(after?.status, 'pending');
     assert.equal(after?.attempts, 1);
     assert.equal(after?.lastError, 'boom');
+    assert.equal(after?.claimedBy, null);
+    assert.equal(after?.claimedAt, null);
+    // The retry delay pushes availableAt INTO THE FUTURE by delayMs.
     assert.ok(new Date(after!.availableAt).getTime() >= before + 5_000);
   });
 
-  test('retry without lastError clears the previous one', async () => {
+  test('retry without lastError clears the previous one; attempts accumulate', async () => {
     store.enqueue(db, { topic: 't', payload: {} });
-    const [claimed] = await store.claimBatch(db, cfg);
+    const [first] = await store.claimBatch(db, cfg);
     // Due again at once, so the next claim picks it up with 'boom' still set.
-    await store.retry(db, claimed!.id, 0, 'boom', cfg.workerInstanceId);
-    await store.claimBatch(db, cfg);
-    await store.retry(db, claimed!.id, 1_000, undefined, cfg.workerInstanceId);
-    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
+    await store.retry(db, claimOf(first!), 0, 'boom');
+    const [second] = await store.claimBatch(db, cfg);
+    await store.retry(db, claimOf(second!), 1_000);
+    const after = fetch(first!.id);
     assert.equal(after?.lastError, null);
     assert.equal(after?.attempts, 2);
   });
 
-  test('markFailed transitions the row', async () => {
+  test('markFailed records the reason', async () => {
     store.enqueue(db, { topic: 't', payload: {} });
     const [claimed] = await store.claimBatch(db, cfg);
-    await store.markFailed(db, claimed!.id, 'dead', cfg.workerInstanceId);
-    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
+    assert.equal(await store.markFailed(db, claimOf(claimed!), 'dead'), true);
+    const after = fetch(claimed!.id);
     assert.equal(after?.status, 'failed');
     assert.equal(after?.lastError, 'dead');
     assert.equal(after?.attempts, 1);
   });
+
+  test('#62: a worker whose stuck claim was taken over cannot move the row', async () => {
+    const row = store.enqueue(db, { topic: 't', payload: {} });
+    const [mine] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-A' });
+    backdate(row.id);
+    const [theirs] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-B' });
+    const owned = fetch(row.id);
+    assert.equal(await store.markCompleted(db, claimOf(mine!)), false);
+    assert.equal(await store.retry(db, claimOf(mine!), 0, 'late'), false);
+    assert.equal(await store.markFailed(db, claimOf(mine!), 'late'), false);
+    assert.deepEqual(fetch(row.id), owned);
+    assert.equal(await store.markCompleted(db, claimOf(theirs!)), true);
+  });
+
+  test('an earlier claim under the same worker id cannot move the row', async () => {
+    // Two loops in one process share the default host-pid id, so the id alone
+    // cannot tell the stale claim from the live one; the claim stamp does.
+    const row = store.enqueue(db, { topic: 't', payload: {} });
+    await store.claimBatch(db, cfg);
+    backdate(row.id);
+    const stale = claimOf(fetch(row.id) as OutboxEventRow);
+    const [live] = await store.claimBatch(db, cfg);
+    assert.equal(live?.claimedBy, stale.claimedBy);
+    const owned = fetch(row.id);
+    assert.equal(await store.retry(db, stale, 0, 'late'), false);
+    assert.deepEqual(fetch(row.id), owned);
+    assert.equal(await store.markCompleted(db, claimOf(live!)), true);
+  });
+
+  // The fence has four conditions; each case below breaks exactly one, so
+  // dropping any of them from the store fails a case.
+  const transitions: [string, (claim: OutboxClaim) => Promise<boolean>][] = [
+    ['markCompleted', (claim) => store.markCompleted(db, claim)],
+    ['retry', (claim) => store.retry(db, claim, 0, 'stale')],
+    ['markFailed', (claim) => store.markFailed(db, claim, 'stale')],
+  ];
+  for (const [name, transition] of transitions) {
+    test(`${name} with another claimedBy writes nothing`, async () => {
+      store.enqueue(db, { topic: 't', payload: {} });
+      const [claimed] = await store.claimBatch(db, cfg);
+      const before = fetch(claimed!.id);
+      assert.equal(await transition({ ...claimOf(claimed!), claimedBy: 'another-worker' }), false);
+      assert.deepEqual(fetch(claimed!.id), before);
+    });
+
+    test(`${name} with another claimedAt writes nothing`, async () => {
+      store.enqueue(db, { topic: 't', payload: {} });
+      const [claimed] = await store.claimBatch(db, cfg);
+      const before = fetch(claimed!.id);
+      const earlier = new Date(Date.parse(claimed!.claimedAt!) - 60_000).toISOString();
+      assert.equal(await transition({ ...claimOf(claimed!), claimedAt: earlier }), false);
+      assert.deepEqual(fetch(claimed!.id), before);
+    });
+
+    test(`${name} on a row that is no longer processing writes nothing`, async () => {
+      store.enqueue(db, { topic: 't', payload: {} });
+      const [claimed] = await store.claimBatch(db, cfg);
+      // markCompleted keeps the claim stamp, so only the status tells.
+      await store.markCompleted(db, claimOf(claimed!));
+      const before = fetch(claimed!.id);
+      assert.equal(await transition(claimOf(claimed!)), false);
+      assert.deepEqual(fetch(claimed!.id), before);
+    });
+
+    test(`${name} moves only its own row, not the rest of its batch`, async () => {
+      store.enqueue(db, { topic: 't', payload: {} });
+      store.enqueue(db, { topic: 't', payload: {} });
+      const [mine, other] = await store.claimBatch(db, cfg);
+      // One claim stamps the whole batch, so only the id tells the rows apart.
+      assert.equal(mine!.claimedAt, other!.claimedAt);
+      const before = fetch(other!.id);
+      assert.equal(await transition(claimOf(mine!)), true);
+      assert.deepEqual(fetch(other!.id), before);
+    });
+  }
 });
 
 describe('SqliteInboxStore', () => {

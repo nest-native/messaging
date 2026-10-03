@@ -5,6 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
 import { eq } from 'drizzle-orm';
 import { DEFAULT_CLAIMER_CONFIG } from '../outbox-claimer.service';
+import type { OutboxClaim, OutboxEventRow } from '../interfaces';
 import {
   inboxEvents,
   isPgUniqueViolation,
@@ -85,46 +86,172 @@ describe('PostgresOutboxStore', () => {
     assert.equal(reclaimed[0]?.claimedBy, cfg.workerInstanceId);
   });
 
-  test('markCompleted transitions the row', async () => {
+  test('#62: the claim runs at READ COMMITTED whatever the database default', async () => {
+    // Under REPEATABLE READ or SERIALIZABLE, a row another worker claims while
+    // the scan is running fails the claim (40001) instead of being skipped.
+    const configs: unknown[] = [];
+    const recording = {
+      transaction: (...args: Parameters<typeof db.transaction>) => {
+        configs.push(args[1]);
+        return db.transaction(...args);
+      },
+    };
+    await store.enqueue(db, { topic: 't', payload: {} });
+    assert.equal((await store.claimBatch(recording, cfg)).length, 1);
+    assert.deepEqual(configs, [{ isolationLevel: 'read committed' }]);
+  });
+
+  // The claim the claimer hands back: the row's id plus the stamp claimBatch wrote.
+  const claimOf = (row: OutboxEventRow): OutboxClaim => ({
+    id: row.id,
+    claimedBy: row.claimedBy!,
+    claimedAt: row.claimedAt!,
+  });
+  // Ages a claim past stuckTimeoutMs, as if its worker had stalled.
+  const backdate = (id: string) =>
+    db
+      .update(outboxEvents)
+      .set({ claimedAt: new Date(Date.now() - 10_000).toISOString() })
+      .where(eq(outboxEvents.id, id));
+
+  test('markCompleted transitions the row its claim still holds', async () => {
     await store.enqueue(db, { topic: 't', payload: {} });
     const [claimed] = await store.claimBatch(db, cfg);
-    await store.markCompleted(db, claimed!.id, cfg.workerInstanceId);
+    assert.equal(await store.markCompleted(db, claimOf(claimed!)), true);
     assert.equal((await fetch(claimed!.id))?.status, 'completed');
   });
 
-  test('retry transitions the row and schedules next attempt', async () => {
+  test('retry re-arms the row and releases the claim', async () => {
     await store.enqueue(db, { topic: 't', payload: {} });
     const [claimed] = await store.claimBatch(db, cfg);
     const before = Date.now();
-    await store.retry(db, claimed!.id, 5_000, 'boom', cfg.workerInstanceId);
+    assert.equal(await store.retry(db, claimOf(claimed!), 5_000, 'boom'), true);
     const after = await fetch(claimed!.id);
     assert.equal(after?.status, 'pending');
     assert.equal(after?.attempts, 1);
     assert.equal(after?.lastError, 'boom');
+    // The retry delay pushes availableAt INTO THE FUTURE by delayMs.
     assert.ok(new Date(after!.availableAt).getTime() >= before + 5_000);
     assert.equal(after?.claimedBy, null);
+    assert.equal(after?.claimedAt, null);
   });
 
-  test('retry without lastError clears the previous one', async () => {
+  test('retry without lastError clears the previous one; attempts accumulate', async () => {
     await store.enqueue(db, { topic: 't', payload: {} });
-    const [claimed] = await store.claimBatch(db, cfg);
+    const [first] = await store.claimBatch(db, cfg);
     // Due again at once, so the next claim picks it up with 'boom' still set.
-    await store.retry(db, claimed!.id, 0, 'boom', cfg.workerInstanceId);
-    await store.claimBatch(db, cfg);
-    await store.retry(db, claimed!.id, 1_000, undefined, cfg.workerInstanceId);
-    const after = await fetch(claimed!.id);
+    await store.retry(db, claimOf(first!), 0, 'boom');
+    const [second] = await store.claimBatch(db, cfg);
+    await store.retry(db, claimOf(second!), 1_000);
+    const after = await fetch(first!.id);
     assert.equal(after?.lastError, null);
     assert.equal(after?.attempts, 2);
   });
 
-  test('markFailed transitions the row', async () => {
+  test('markFailed records the reason', async () => {
     await store.enqueue(db, { topic: 't', payload: {} });
     const [claimed] = await store.claimBatch(db, cfg);
-    await store.markFailed(db, claimed!.id, 'dead', cfg.workerInstanceId);
+    assert.equal(await store.markFailed(db, claimOf(claimed!), 'dead'), true);
     const after = await fetch(claimed!.id);
     assert.equal(after?.status, 'failed');
+    assert.equal(after?.lastError, 'dead');
     assert.equal(after?.attempts, 1);
   });
+
+  test('#62: a worker whose stuck claim was taken over cannot move the row', async () => {
+    const row = await store.enqueue(db, { topic: 't', payload: {} });
+    const [mine] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-A' });
+    await backdate(row.id);
+    const [theirs] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-B' });
+    const owned = await fetch(row.id);
+    assert.equal(await store.markCompleted(db, claimOf(mine!)), false);
+    assert.equal(await store.retry(db, claimOf(mine!), 0, 'late'), false);
+    assert.equal(await store.markFailed(db, claimOf(mine!), 'late'), false);
+    assert.deepEqual(await fetch(row.id), owned);
+    assert.equal(await store.markCompleted(db, claimOf(theirs!)), true);
+  });
+
+  test('an earlier claim under the same worker id cannot move the row', async () => {
+    // Two loops in one process share the default host-pid id, so the id alone
+    // cannot tell the stale claim from the live one; the claim stamp does.
+    const row = await store.enqueue(db, { topic: 't', payload: {} });
+    await store.claimBatch(db, cfg);
+    await backdate(row.id);
+    const stale = claimOf((await fetch(row.id)) as OutboxEventRow);
+    const [live] = await store.claimBatch(db, cfg);
+    assert.equal(live?.claimedBy, stale.claimedBy);
+    const owned = await fetch(row.id);
+    assert.equal(await store.retry(db, stale, 0, 'late'), false);
+    assert.deepEqual(await fetch(row.id), owned);
+    assert.equal(await store.markCompleted(db, claimOf(live!)), true);
+  });
+
+  test('a transition that hits a serialization failure reports the claim lost', async () => {
+    // What a REPEATABLE READ or SERIALIZABLE server raises (40001) when the
+    // row changed under the UPDATE; drizzle may wrap it as the `cause`.
+    const failing = (error: unknown) => ({
+      update: () => ({
+        set: () => ({ where: () => ({ returning: () => Promise.reject(error) }) }),
+      }),
+    });
+    const serialization = Object.assign(new Error('could not serialize access'), { code: '40001' });
+    const claim: OutboxClaim = { id: 'x', claimedBy: 'w', claimedAt: new Date().toISOString() };
+    for (const error of [serialization, Object.assign(new Error('Failed query'), { cause: serialization })]) {
+      assert.equal(await store.markCompleted(failing(error), claim), false);
+      assert.equal(await store.retry(failing(error), claim, 0, 'x'), false);
+      assert.equal(await store.markFailed(failing(error), claim, 'x'), false);
+    }
+    // Anything else still throws.
+    await assert.rejects(store.markCompleted(failing(new Error('connection lost')), claim), /connection lost/);
+    await assert.rejects(store.markCompleted(failing(null), claim));
+  });
+
+  // The fence has four conditions; each case below breaks exactly one, so
+  // dropping any of them from the store fails a case.
+  const transitions: [string, (claim: OutboxClaim) => Promise<boolean>][] = [
+    ['markCompleted', (claim) => store.markCompleted(db, claim)],
+    ['retry', (claim) => store.retry(db, claim, 0, 'stale')],
+    ['markFailed', (claim) => store.markFailed(db, claim, 'stale')],
+  ];
+  for (const [name, transition] of transitions) {
+    test(`${name} with another claimedBy writes nothing`, async () => {
+      await store.enqueue(db, { topic: 't', payload: {} });
+      const [claimed] = await store.claimBatch(db, cfg);
+      const before = await fetch(claimed!.id);
+      assert.equal(await transition({ ...claimOf(claimed!), claimedBy: 'another-worker' }), false);
+      assert.deepEqual(await fetch(claimed!.id), before);
+    });
+
+    test(`${name} with another claimedAt writes nothing`, async () => {
+      await store.enqueue(db, { topic: 't', payload: {} });
+      const [claimed] = await store.claimBatch(db, cfg);
+      const before = await fetch(claimed!.id);
+      const earlier = new Date(Date.parse(claimed!.claimedAt!) - 60_000).toISOString();
+      assert.equal(await transition({ ...claimOf(claimed!), claimedAt: earlier }), false);
+      assert.deepEqual(await fetch(claimed!.id), before);
+    });
+
+    test(`${name} on a row that is no longer processing writes nothing`, async () => {
+      await store.enqueue(db, { topic: 't', payload: {} });
+      const [claimed] = await store.claimBatch(db, cfg);
+      // markCompleted keeps the claim stamp, so only the status tells.
+      await store.markCompleted(db, claimOf(claimed!));
+      const before = await fetch(claimed!.id);
+      assert.equal(await transition(claimOf(claimed!)), false);
+      assert.deepEqual(await fetch(claimed!.id), before);
+    });
+
+    test(`${name} moves only its own row, not the rest of its batch`, async () => {
+      await store.enqueue(db, { topic: 't', payload: {} });
+      await store.enqueue(db, { topic: 't', payload: {} });
+      const [mine, other] = await store.claimBatch(db, cfg);
+      // One claim stamps the whole batch, so only the id tells the rows apart.
+      assert.equal(mine!.claimedAt, other!.claimedAt);
+      const before = await fetch(other!.id);
+      assert.equal(await transition(claimOf(mine!)), true);
+      assert.deepEqual(await fetch(other!.id), before);
+    });
+  }
 
   async function fetch(id: string) {
     const rows = await db.select().from(outboxEvents).where(eq(outboxEvents.id, id));

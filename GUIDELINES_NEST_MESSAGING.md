@@ -16,6 +16,14 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   `claimBatch`, `mark*`). The engine only *calls* them and awaits results from
   outside their transactions — safe on sync and async drivers alike. This is the
   generalization of the reference-app's sqlite-only synchronous casts.
+- **Claims are exclusive; transitions are fenced on the claim.**
+  - A store's `claimBatch` never hands one row to two concurrent callers:
+    `FOR UPDATE SKIP LOCKED` on Postgres and MySQL, inside a READ COMMITTED
+    transaction.
+  - `markCompleted`, `retry` and `markFailed` match the row only while it is
+    `processing` under the exact `claimedBy` + `claimedAt` the claim wrote, and
+    report whether they applied.
+  - A worker that lost its claim must never be able to write the row.
 - **Transport seam.** The claimer publishes through `OutboxTransport`; the
   in-process default and the `@nest-native/messaging/kafka` and
   `@nest-native/messaging/rabbitmq` adapters implement it. The core never imports
@@ -243,6 +251,16 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   skipped suite is not a skipped test, so the summary alone passes a run in
   which every backend was missing. A new backend or a new gated spec lands
   with its service in the `integration` job in the same PR.
+- **A concurrency fix lands with a spec that fails on the unfixed code, every
+  time.**
+  - Two calls in a `Promise.all` do not overlap unless both connections are
+    already open. Hold the contended rows from a second connection
+    (`SELECT … FOR UPDATE`), or warm the pool first.
+  - Revert the fix once to watch the spec fail. #72's first spec passed with
+    and without the fix.
+- **Workflow steps that write to the pull request skip fork PRs**
+  (`github.event.pull_request.head.repo.full_name == github.repository`). A
+  fork's token is read-only, so the write would fail the job.
 
 ### 5. Security Review Requirements (MANDATORY)
 - Every PR includes an explicit supply-chain + application-security pass.

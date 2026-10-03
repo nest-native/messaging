@@ -3,6 +3,7 @@ import { and, eq, inArray, lte, or, sql } from 'drizzle-orm';
 import type { MySql2Database } from 'drizzle-orm/mysql2';
 import type {
   EnqueueInput,
+  OutboxClaim,
   OutboxEventRow,
   OutboxStore,
   ResolvedClaimerConfig,
@@ -10,6 +11,20 @@ import type {
 import { outboxEvents } from './schema';
 
 type Db = MySql2Database<Record<string, never>>;
+
+/**
+ * Matches the row only while `claim` still holds it: same row, still
+ * `processing`, under exactly the stamp `claimBatch` wrote. A stale worker's
+ * transition then matches nothing — whether another worker reclaimed the row or
+ * a later claim reused the same `workerInstanceId`.
+ */
+const heldBy = (claim: OutboxClaim) =>
+  and(
+    eq(outboxEvents.id, claim.id),
+    eq(outboxEvents.status, 'processing'),
+    eq(outboxEvents.claimedBy, claim.claimedBy),
+    eq(outboxEvents.claimedAt, claim.claimedAt),
+  );
 
 /**
  * MySQL (mysql2) outbox store. Every method is **asynchronous** — `enqueue`
@@ -74,25 +89,28 @@ export class MysqlOutboxStore implements OutboxStore {
         .set({ status: 'processing', claimedAt: nowIso, claimedBy: cfg.workerInstanceId })
         .where(inArray(outboxEvents.id, ids));
       return tx.select().from(outboxEvents).where(inArray(outboxEvents.id, ids));
-    });
+      // READ COMMITTED, not InnoDB's default REPEATABLE READ: there the locking
+      // read also locks the gaps it scans, so every concurrent enqueue INSERT
+      // would wait for the claim to commit.
+    }, { isolationLevel: 'read committed' });
   }
 
-  async markCompleted(db: unknown, id: string, claimedBy: string): Promise<void> {
-    await (db as Db)
+  async markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean> {
+    const [result] = await (db as Db)
       .update(outboxEvents)
       .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+      .where(heldBy(claim));
+    return result.affectedRows > 0;
   }
 
   async retry(
     db: unknown,
-    id: string,
+    claim: OutboxClaim,
     delayMs: number,
-    lastError: string | undefined,
-    claimedBy: string,
-  ): Promise<void> {
+    lastError?: string,
+  ): Promise<boolean> {
     const nextAvailable = new Date(Date.now() + delayMs).toISOString();
-    await (db as Db)
+    const [result] = await (db as Db)
       .update(outboxEvents)
       .set({
         status: 'pending',
@@ -102,11 +120,12 @@ export class MysqlOutboxStore implements OutboxStore {
         claimedBy: null,
         lastError: lastError ?? null,
       })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+      .where(heldBy(claim));
+    return result.affectedRows > 0;
   }
 
-  async markFailed(db: unknown, id: string, reason: string, claimedBy: string): Promise<void> {
-    await (db as Db)
+  async markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean> {
+    const [result] = await (db as Db)
       .update(outboxEvents)
       .set({
         status: 'failed',
@@ -114,6 +133,7 @@ export class MysqlOutboxStore implements OutboxStore {
         lastError: reason,
         processedAt: new Date().toISOString(),
       })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+      .where(heldBy(claim));
+    return result.affectedRows > 0;
   }
 }

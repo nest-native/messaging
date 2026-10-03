@@ -3,6 +3,7 @@ import { and, eq, inArray, lte, or, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type {
   EnqueueInput,
+  OutboxClaim,
   OutboxEventRow,
   OutboxStore,
   ResolvedClaimerConfig,
@@ -10,6 +11,20 @@ import type {
 import { outboxEvents } from './schema';
 
 type Db = BetterSQLite3Database<Record<string, never>>;
+
+/**
+ * Matches the row only while `claim` still holds it: same row, still
+ * `processing`, under exactly the stamp `claimBatch` wrote. A stale worker's
+ * transition then matches nothing — whether another worker reclaimed the row or
+ * a later claim reused the same `workerInstanceId`.
+ */
+const heldBy = (claim: OutboxClaim) =>
+  and(
+    eq(outboxEvents.id, claim.id),
+    eq(outboxEvents.status, 'processing'),
+    eq(outboxEvents.claimedBy, claim.claimedBy),
+    eq(outboxEvents.claimedAt, claim.claimedAt),
+  );
 
 /**
  * SQLite (better-sqlite3) outbox store. Every method runs **synchronously** —
@@ -74,18 +89,18 @@ export class SqliteOutboxStore implements OutboxStore {
     return Promise.resolve(rows);
   }
 
-  markCompleted(db: unknown, id: string, claimedBy: string): Promise<void> {
-    (db as Db)
+  markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean> {
+    const { changes } = (db as Db)
       .update(outboxEvents)
       .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)))
+      .where(heldBy(claim))
       .run();
-    return Promise.resolve();
+    return Promise.resolve(changes > 0);
   }
 
-  retry(db: unknown, id: string, delayMs: number, lastError: string | undefined, claimedBy: string): Promise<void> {
+  retry(db: unknown, claim: OutboxClaim, delayMs: number, lastError?: string): Promise<boolean> {
     const nextAvailable = new Date(Date.now() + delayMs).toISOString();
-    (db as Db)
+    const { changes } = (db as Db)
       .update(outboxEvents)
       .set({
         status: 'pending',
@@ -95,13 +110,13 @@ export class SqliteOutboxStore implements OutboxStore {
         claimedBy: null,
         lastError: lastError ?? null,
       })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)))
+      .where(heldBy(claim))
       .run();
-    return Promise.resolve();
+    return Promise.resolve(changes > 0);
   }
 
-  markFailed(db: unknown, id: string, reason: string, claimedBy: string): Promise<void> {
-    (db as Db)
+  markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean> {
+    const { changes } = (db as Db)
       .update(outboxEvents)
       .set({
         status: 'failed',
@@ -109,8 +124,8 @@ export class SqliteOutboxStore implements OutboxStore {
         lastError: reason,
         processedAt: new Date().toISOString(),
       })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)))
+      .where(heldBy(claim))
       .run();
-    return Promise.resolve();
+    return Promise.resolve(changes > 0);
   }
 }

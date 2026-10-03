@@ -9,7 +9,7 @@ import {
   MysqlInboxStore,
   MysqlOutboxStore,
 } from '../dialects/mysql';
-import type { OutboxEventRow } from '../interfaces';
+import type { OutboxClaim, OutboxEventRow } from '../interfaces';
 
 // There is no in-process MySQL (the pglite equivalent does not exist), so the
 // store methods are exercised against a recording stand-in for a mysql2 Drizzle
@@ -49,6 +49,8 @@ function row(overrides: Partial<OutboxEventRow> = {}): OutboxEventRow {
 interface OutboxMockOptions {
   selectRows?: OutboxEventRow[];
   candidates?: { id: string }[];
+  /** What the transitions' UPDATE reports, as mysql2's ResultSetHeader would. */
+  affectedRows?: number;
 }
 
 interface CapturedQueries {
@@ -56,6 +58,8 @@ interface CapturedQueries {
   set?: Record<string, unknown>;
   projection?: Record<string, unknown>;
   candidatesWhere?: unknown;
+  lock?: unknown[];
+  transactionConfig?: unknown;
   updateWhere?: unknown;
 }
 
@@ -72,7 +76,10 @@ function outboxMock(options: OutboxMockOptions = {}) {
           captured.candidatesWhere = condition;
           return {
             limit: () => ({
-              for: () => Promise.resolve(options.candidates ?? []),
+              for: (...lock: unknown[]) => {
+                captured.lock = lock;
+                return Promise.resolve(options.candidates ?? []);
+              },
             }),
           };
         }
@@ -94,12 +101,15 @@ function outboxMock(options: OutboxMockOptions = {}) {
         return {
           where: (condition: unknown) => {
             captured.updateWhere = condition;
-            return Promise.resolve([{}]);
+            return Promise.resolve([{ affectedRows: options.affectedRows ?? 1 }]);
           },
         };
       },
     }),
-    transaction: (run: (tx: unknown) => unknown) => run(db),
+    transaction: (run: (tx: unknown) => unknown, config?: unknown) => {
+      captured.transactionConfig = config;
+      return run(db);
+    },
   };
   return { db, captured };
 }
@@ -172,6 +182,12 @@ describe('MysqlOutboxStore', () => {
     const updateWhere = render(captured.updateWhere);
     assert.match(updateWhere.sql, /`outbox_events`\.`id` in \(\?\)/);
     assert.deepEqual(updateWhere.params, ['a']);
+
+    // #62: candidates are locked so a concurrent claim skips them instead of
+    // claiming them too, and the claim runs at READ COMMITTED so its locking
+    // read takes no gap locks that would block concurrent enqueue INSERTs.
+    assert.deepEqual(captured.lock, ['update', { skipLocked: true }]);
+    assert.deepEqual(captured.transactionConfig, { isolationLevel: 'read committed' });
   });
 
   test('claimBatch returns [] with no update when nothing is due', async () => {
@@ -181,18 +197,35 @@ describe('MysqlOutboxStore', () => {
     assert.equal(captured.set, undefined);
   });
 
+  const claim: OutboxClaim = {
+    id: 'id-1',
+    claimedBy: 'worker-1',
+    claimedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  // Every transition matches the row only while the claim still holds it.
+  const assertFenced = (updateWhere: unknown) => {
+    const where = render(updateWhere);
+    assert.match(
+      where.sql,
+      /`outbox_events`\.`id` = \? and `outbox_events`\.`status` = \? and `outbox_events`\.`claimed_by` = \? and `outbox_events`\.`claimed_at` = \?/,
+    );
+    assert.deepEqual(where.params, ['id-1', 'processing', 'worker-1', '2026-01-01T00:00:00.000Z']);
+  };
+
   test('markCompleted transitions the row to completed', async () => {
     const { db, captured } = outboxMock();
-    await store.markCompleted(db, 'id-1', 'worker-1');
+    assert.equal(await store.markCompleted(db, claim), true);
     assert.equal(captured.set?.status, 'completed');
     assert.equal(captured.set?.lastError, null);
     assert.ok(typeof captured.set?.processedAt === 'string');
+    assertFenced(captured.updateWhere);
   });
 
   test('retry re-arms the row, carrying or clearing lastError', async () => {
     const withError = outboxMock();
     const before = Date.now();
-    await store.retry(withError.db, 'id-1', 5_000, 'boom', 'worker-1');
+    assert.equal(await store.retry(withError.db, claim, 5_000, 'boom'), true);
     assert.equal(withError.captured.set?.status, 'pending');
     assert.equal(withError.captured.set?.lastError, 'boom');
     assert.equal(withError.captured.set?.claimedAt, null);
@@ -202,19 +235,28 @@ describe('MysqlOutboxStore', () => {
     assert.ok(nextAvailable >= before + 5_000);
     // ...and attempts increments IN SQL (`attempts + 1`), not via a read-modify-write.
     assert.match(render(withError.captured.set?.attempts).sql, /`attempts` \+ 1/);
+    assertFenced(withError.captured.updateWhere);
 
     const noError = outboxMock();
-    await store.retry(noError.db, 'id-1', 1_000, undefined, 'worker-1');
+    await store.retry(noError.db, claim, 1_000);
     assert.equal(noError.captured.set?.lastError, null);
   });
 
   test('markFailed records the reason and increments attempts', async () => {
     const { db, captured } = outboxMock();
-    await store.markFailed(db, 'id-1', 'dead', 'worker-1');
+    assert.equal(await store.markFailed(db, claim, 'dead'), true);
     assert.equal(captured.set?.status, 'failed');
     assert.equal(captured.set?.lastError, 'dead');
     assert.ok(typeof captured.set?.processedAt === 'string');
     assert.match(render(captured.set?.attempts).sql, /`attempts` \+ 1/);
+    assertFenced(captured.updateWhere);
+  });
+
+  test('each transition resolves false when its claim no longer holds the row', async () => {
+    const lost = () => outboxMock({ affectedRows: 0 }).db;
+    assert.equal(await store.markCompleted(lost(), claim), false);
+    assert.equal(await store.retry(lost(), claim, 0, 'late'), false);
+    assert.equal(await store.markFailed(lost(), claim, 'late'), false);
   });
 });
 

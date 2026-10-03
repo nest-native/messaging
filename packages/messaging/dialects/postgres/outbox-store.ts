@@ -3,6 +3,7 @@ import { and, eq, inArray, lte, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type {
   EnqueueInput,
+  OutboxClaim,
   OutboxEventRow,
   OutboxStore,
   ResolvedClaimerConfig,
@@ -11,6 +12,40 @@ import { outboxEvents } from './schema';
 import { assertValidWakeChannel } from './wake';
 
 type Db = NodePgDatabase<Record<string, never>>;
+
+/**
+ * Matches the row only while `claim` still holds it: same row, still
+ * `processing`, under exactly the stamp `claimBatch` wrote. A stale worker's
+ * transition then matches nothing — whether another worker reclaimed the row or
+ * a later claim reused the same `workerInstanceId`.
+ */
+const heldBy = (claim: OutboxClaim) =>
+  and(
+    eq(outboxEvents.id, claim.id),
+    eq(outboxEvents.status, 'processing'),
+    eq(outboxEvents.claimedBy, claim.claimedBy),
+    eq(outboxEvents.claimedAt, claim.claimedAt),
+  );
+
+/**
+ * Whether a fenced UPDATE wrote the row. Under a REPEATABLE READ or
+ * SERIALIZABLE server default, an UPDATE that waited on a row another claim was
+ * taking fails with 40001 once that claim commits, instead of re-checking the
+ * fence. The claim is lost either way, so that failure means `false` too.
+ */
+async function wrote(update: PromiseLike<{ id: string }[]>): Promise<boolean> {
+  try {
+    return (await update).length > 0;
+  } catch (error) {
+    if (isSerializationFailure(error)) return false;
+    throw error;
+  }
+}
+
+const isSerializationFailure = (error: unknown): boolean =>
+  [error, (error as { cause?: unknown } | null)?.cause].some(
+    (e) => typeof e === 'object' && e !== null && (e as { code?: unknown }).code === '40001',
+  );
 
 export interface PostgresOutboxStoreOptions {
   /**
@@ -94,46 +129,57 @@ export class PostgresOutboxStore implements OutboxStore {
         .set({ status: 'processing', claimedAt: nowIso, claimedBy: cfg.workerInstanceId })
         .where(inArray(outboxEvents.id, ids));
       return tx.select().from(outboxEvents).where(inArray(outboxEvents.id, ids));
-    });
+      // Pinned whatever the database default: under REPEATABLE READ or
+      // SERIALIZABLE, a row another worker claims while this scan is running
+      // fails the whole claim (40001) instead of being skipped.
+    }, { isolationLevel: 'read committed' });
   }
 
-  async markCompleted(db: unknown, id: string, claimedBy: string): Promise<void> {
-    await (db as Db)
-      .update(outboxEvents)
-      .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+  async markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean> {
+    return wrote(
+      (db as Db)
+        .update(outboxEvents)
+        .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
+        .where(heldBy(claim))
+        .returning({ id: outboxEvents.id }),
+    );
   }
 
   async retry(
     db: unknown,
-    id: string,
+    claim: OutboxClaim,
     delayMs: number,
-    lastError: string | undefined,
-    claimedBy: string,
-  ): Promise<void> {
+    lastError?: string,
+  ): Promise<boolean> {
     const nextAvailable = new Date(Date.now() + delayMs).toISOString();
-    await (db as Db)
-      .update(outboxEvents)
-      .set({
-        status: 'pending',
-        attempts: sql`${outboxEvents.attempts} + 1`,
-        availableAt: nextAvailable,
-        claimedAt: null,
-        claimedBy: null,
-        lastError: lastError ?? null,
-      })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+    return wrote(
+      (db as Db)
+        .update(outboxEvents)
+        .set({
+          status: 'pending',
+          attempts: sql`${outboxEvents.attempts} + 1`,
+          availableAt: nextAvailable,
+          claimedAt: null,
+          claimedBy: null,
+          lastError: lastError ?? null,
+        })
+        .where(heldBy(claim))
+        .returning({ id: outboxEvents.id }),
+    );
   }
 
-  async markFailed(db: unknown, id: string, reason: string, claimedBy: string): Promise<void> {
-    await (db as Db)
-      .update(outboxEvents)
-      .set({
-        status: 'failed',
-        attempts: sql`${outboxEvents.attempts} + 1`,
-        lastError: reason,
-        processedAt: new Date().toISOString(),
-      })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+  async markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean> {
+    return wrote(
+      (db as Db)
+        .update(outboxEvents)
+        .set({
+          status: 'failed',
+          attempts: sql`${outboxEvents.attempts} + 1`,
+          lastError: reason,
+          processedAt: new Date().toISOString(),
+        })
+        .where(heldBy(claim))
+        .returning({ id: outboxEvents.id }),
+    );
   }
 }

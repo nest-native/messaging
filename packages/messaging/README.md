@@ -142,7 +142,7 @@ whole story anyway — its processes share one machine by definition).
 
 ## Status & scope
 
-- **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
+- **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL 8.0.1+ (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and RabbitMQ (`amqplib`) — see [RabbitMQ](https://nest-native.dev/messaging/docs/rabbitmq).
 - **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; the wake tiers cut that idle wait — `OutboxWaker` in-process, the `WakeSocket` pair across processes on one machine, and Postgres `LISTEN`/`NOTIFY` across machines (see above).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.

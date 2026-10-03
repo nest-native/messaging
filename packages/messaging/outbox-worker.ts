@@ -1,5 +1,9 @@
 import type { ClaimerConfig } from './interfaces';
-import type { OutboxClaimer, TickReport } from './outbox-claimer.service';
+import {
+  type OutboxClaimer,
+  resolveClaimerConfig,
+  type TickReport,
+} from './outbox-claimer.service';
 import type { OutboxWaker } from './outbox-waker';
 
 export interface WorkerLoopOptions {
@@ -30,11 +34,16 @@ export interface WorkerLoopOptions {
  *
  * Pass a {@link OutboxWaker} to have that idle wait woken early by an in-process
  * `notify()`; without one, the loop is a pure poller.
+ *
+ * An invalid `options.claimer` rejects at once, before the first tick: it is a
+ * wiring mistake, and every tick would otherwise throw into an optional
+ * `onError`.
  */
 export async function runWorkerLoop(
   claimer: OutboxClaimer,
   options: WorkerLoopOptions = {},
 ): Promise<void> {
+  resolveClaimerConfig(options.claimer);
   const pollIntervalMs = options.pollIntervalMs ?? 2_000;
   const { signal, waker } = options;
   // The idle/error wait is either woken early by the waker or a plain sleep.

@@ -8,6 +8,56 @@ package release is useful for users.
 
 ## Unreleased
 
+- **Concurrent workers no longer publish the same outbox event twice** (#62).
+  On Postgres and MySQL, two workers claiming at the same moment could both
+  select the same pending rows and both publish them. A worker whose stalled
+  claim had been taken over could also still mark the row completed, retried
+  or failed.
+  - The claim now locks its rows with `FOR UPDATE SKIP LOCKED`, so concurrent
+    claims split the backlog. Found and fixed by @donfreddy in #72.
+  - The claim runs at READ COMMITTED whatever the server default. Under
+    InnoDB's default REPEATABLE READ, that locking read would hold gap locks
+    and make every concurrent `enqueue` wait. On a Postgres server defaulting
+    to REPEATABLE READ or SERIALIZABLE, a row claimed by another worker during
+    the scan would fail the claim instead of being skipped.
+  - Every transition applies only while the row is still `processing` under the
+    exact claim that took it: its `claimedBy` and `claimedAt`. This holds even
+    when two loops share a `workerInstanceId`. A transition that loses this race
+    writes nothing; on Postgres that includes the serialization failure a
+    stricter server default raises.
+  - Once a batch has been held longer than `stuckTimeoutMs`, the worker skips
+    its remaining events instead of publishing them again. The first event of a
+    batch is always published, so a slow claim still makes progress.
+  - Both cases count in the new `TickReport.lost` and are logged with the
+    publish error.
+- **Failing to record a delivery no longer retries a published event.** A
+  database error from `markCompleted` was handled like a failed publish: it
+  spent an attempt, and on the last one marked the delivered event failed.
+  `tick()` now throws, and the event is published again once its claim goes
+  stale.
+- **A `ClaimerConfig` field set to `undefined` keeps its default.**
+  `{ workerInstanceId: process.env.WORKER_ID }` with the variable unset used to
+  claim rows under no owner.
+  - Invalid values now throw. A numeric string from an env-backed config is
+    named as a string in the error.
+  - `runWorkerLoop` rejects at once instead of failing every tick.
+  - `resolveClaimerConfig()` is exported, so a worker can check its config at
+    startup.
+- **Breaking for custom `OutboxStore` implementations.**
+  - `markCompleted`, `retry` and `markFailed` take the row's claim (`OutboxClaim`:
+    `{ id, claimedBy, claimedAt }`) instead of its id.
+  - They resolve `true` when they wrote the row and `false` when the claim no
+    longer held it.
+  - `claimBatch` must never return one row to two concurrent callers, and must
+    return every row with the `claimedBy` and `claimedAt` it wrote: a row read
+    before the claim's own UPDATE is never published.
+  - The shipped stores are updated.
+- **MySQL 8.0.1 or later is now required**, for `SKIP LOCKED`, with row-based
+  or mixed binary logging (the MySQL 8 default). READ COMMITTED transactions
+  cannot write under `binlog_format=STATEMENT`.
+- **CI no longer fails a fork's pull request** on the report steps that post PR
+  comments.
+
 ## 0.7.0 - 2026-09-29
 
 - **RabbitMQ transport: `@nest-native/messaging/rabbitmq`.** A
