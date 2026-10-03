@@ -142,6 +142,18 @@ describe('SqliteOutboxStore', () => {
     assert.ok(new Date(after!.availableAt).getTime() >= before + 5_000);
   });
 
+  test('retry without lastError clears the previous one', async () => {
+    store.enqueue(db, { topic: 't', payload: {} });
+    const [claimed] = await store.claimBatch(db, cfg);
+    // Due again at once, so the next claim picks it up with 'boom' still set.
+    await store.retry(db, claimed!.id, 0, 'boom', cfg.workerInstanceId);
+    await store.claimBatch(db, cfg);
+    await store.retry(db, claimed!.id, 1_000, undefined, cfg.workerInstanceId);
+    const after = db.select().from(outboxEvents).where(eq(outboxEvents.id, claimed!.id)).get();
+    assert.equal(after?.lastError, null);
+    assert.equal(after?.attempts, 2);
+  });
+
   test('markFailed transitions the row', async () => {
     store.enqueue(db, { topic: 't', payload: {} });
     const [claimed] = await store.claimBatch(db, cfg);
