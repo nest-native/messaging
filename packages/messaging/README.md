@@ -78,7 +78,8 @@ import { OutboxWaker, runWorkerLoop } from '@nest-native/messaging';
 const waker = new OutboxWaker();
 
 // worker: the idle wait is now woken early by notify()
-runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal });
+runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal })
+  .catch((error) => console.error('claimer worker stopped', error));
 
 // request path: notify AFTER the transaction commits (before commit the row
 // isn't visible to the claimer's own transaction yet)
@@ -100,7 +101,8 @@ database — an in-memory `notify()` can't cross the boundary. The
 const waker = new OutboxWaker();
 const wakeServer = new WakeSocketServer({ path: env.outboxWakeSocket, waker });
 await wakeServer.listen(); // recovers a stale path left by a crashed worker
-runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal });
+runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal })
+  .catch((error) => console.error('claimer worker stopped', error));
 
 // app process — same path, fire-and-forget after the commit
 const wake = new WakeSocketClient({ path: env.outboxWakeSocket });

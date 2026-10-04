@@ -64,7 +64,7 @@ interface TickReport {
   completed: number;
   retried: number;
   failed: number;
-  lost: number;                  // let go: the claim expired or was taken over
+  lost: number;                  // let go: the claim expired, was taken over, or came back unstamped
 }
 
 const DEFAULT_CLAIMER_CONFIG: ResolvedClaimerConfig; // exported
@@ -78,7 +78,9 @@ background worker — never inside a business transaction.
 An override set to `undefined` keeps its default, so `{ workerInstanceId:
 process.env.WORKER_ID }` is safe with the variable unset. An invalid value — a
 blank `workerInstanceId`, a `batchSize` below 1, a `stuckTimeoutMs` that is not
-positive, a negative backoff — throws.
+positive, a negative backoff — throws. So does a value of the wrong type,
+including a numeric string from the environment: pass
+`batchSize: env.BATCH_SIZE ? Number(env.BATCH_SIZE) : undefined`.
 
 **Running several workers.** Any number of workers can drain one outbox:
 
@@ -91,15 +93,30 @@ positive, a negative backoff — throws.
   applies only while it is still `processing` under that exact claim
   (`claimedBy` + `claimedAt`). A worker that stalled past the timeout cannot
   overwrite the new owner's outcome, even under the same `workerInstanceId`.
+  On Postgres each transition runs in its own READ COMMITTED transaction, like
+  the claim, so a stricter server default cannot fail a transition whose claim
+  still holds the row.
 - **A batch held too long is cut short.** Once a batch has been held longer
   than `stuckTimeoutMs`, its remaining events may already belong to another
   worker. The worker skips them instead of publishing them a second time. The
   first event of a batch is always published, so a slow claim still makes
   progress.
 
-Both cases count as `lost` and log a warning. A steady non-zero `lost` means
-batches take longer than `stuckTimeoutMs`: raise it or lower `batchSize`. Each
-worker stamps and ages claims with its own clock, so keep worker clocks in sync.
+A transition that lost its claim and an event skipped from an expired batch
+both count as `lost` and log a warning. A steady non-zero `lost` means batches
+take longer than `stuckTimeoutMs`: raise it or lower `batchSize`. A row the
+store returned without a claim stamp also counts as `lost`, and logs an error:
+that is a store bug, which no timeout setting fixes.
+
+Give every worker on one table the same `stuckTimeoutMs`, longer than the
+slowest single publish, and keep their clocks in sync. Each worker stamps, ages
+and reclaims claims with its own clock and its own value, so the smallest
+`stuckTimeoutMs` in the fleet is the one in force.
+
+**Upgrading from 0.7.x.** These guarantees hold once every worker draining a
+table runs this version. A 0.7.x worker can still take over a newer worker's
+claim, and then both publish the event. Stop the 0.7.x workers before starting
+the new ones, or expect duplicates and `lost` warnings while both run.
 
 If recording a delivery fails — the database errors after a successful
 publish — `tick()` throws. The event stays claimed and is published again once
@@ -130,7 +147,10 @@ interface WorkerLoopOptions {
 Loops `claimer.tick()`: when a tick claims a batch it loops immediately to drain
 the backlog; when it claims nothing it waits `pollIntervalMs`. A throwing tick is
 reported via `onError` and the loop continues. An invalid `claimer` config
-rejects the returned promise at once, before the first tick.
+rejects the returned promise at once, before the first tick, so keep that
+promise and handle the rejection: discarded with `void`, it ends the process as
+an unhandled rejection, without reaching `onError`. The promise also rejects,
+and the loop stops, if `onError` itself throws.
 
 ### Wake tiers (cutting the idle latency)
 
@@ -141,7 +161,8 @@ the delivery backstop, so a missed wake only costs one poll interval:
 ```ts
 // same process: notify() after the enqueueing transaction commits
 const waker = new OutboxWaker();
-runWorkerLoop(claimer, { waker, signal });
+runWorkerLoop(claimer, { waker, signal })
+  .catch((error) => console.error('claimer worker stopped', error));
 waker.notify();
 
 // separate processes, same machine: a unix-domain-socket bridge
@@ -287,9 +308,15 @@ An outbox store must uphold what the claimer relies on:
 
 - **`claimBatch` is exclusive.** It never returns one row to two concurrent
   callers, and it stamps every row it returns with `claimedBy` and `claimedAt`.
+  It returns each row as its claiming UPDATE left it. The claimer refuses a row
+  without a string stamp, counting it as `lost` and logging an error, but it
+  cannot tell a stale stamp from the one the claim wrote: a reclaimed row read
+  before that UPDATE carries the previous claim's stamp, and is published under
+  a claim no transition matches, again after every stuck timeout.
 - **Transitions are fenced.** Each one writes the row only while it is still
   `processing` with exactly the claim's `claimedBy` and `claimedAt`. It resolves
-  `true` when it wrote the row and `false` when the claim no longer held it.
+  `true` when it wrote the row and `false` when the claim no longer held it; a
+  database error rejects.
 
 Also exported: `OutboxEventRow`, `ResolvedClaimerConfig` / `ClaimerConfig`,
 `OutboxStatus` / `OUTBOX_STATUSES`, `InboxStatus` / `INBOX_STATUSES`, and the DI
@@ -387,7 +414,14 @@ better-sqlite3 (synchronous) dialect.
 
 ## `@nest-native/messaging/postgres`
 
-node-postgres (asynchronous) dialect. Same shape as `/sqlite`:
+node-postgres (asynchronous) dialect. Same shape as `/sqlite`. On a
+node-postgres `Pool`, the outbox claim and each transition run on a client the
+store checks out itself, so a connection the database drops mid-transaction
+rejects the call instead of crashing the process. Give the pool an `error`
+listener, as node-postgres requires of every pool. The inbox and your own
+`@Transactional` bodies still go through drizzle's `transaction()`, which
+leaves its checked-out client without one; a per-client listener
+(`pool.on('connect', (client) => client.on('error', handle))`) covers those too.
 
 | Export | Kind | Notes |
 | --- | --- | --- |
@@ -399,9 +433,10 @@ node-postgres (asynchronous) dialect. Same shape as `/sqlite`:
 ## `@nest-native/messaging/mysql`
 
 mysql2 (asynchronous) dialect. Same shape as `/postgres`. Needs MySQL 8.0.1 or
-later, for the claim's `FOR UPDATE SKIP LOCKED`, with row-based or mixed binary
-logging (the MySQL 8 default): the claim runs at READ COMMITTED, which InnoDB
-refuses to write under `binlog_format=STATEMENT`.
+later, for the claim's `FOR UPDATE SKIP LOCKED`. The claim runs at READ
+COMMITTED, and with binary logging on InnoDB refuses writes from it under
+`binlog_format=STATEMENT`, so `binlog_format` must be ROW (the MySQL 8 default)
+or MIXED.
 
 | Export | Kind | Notes |
 | --- | --- | --- |

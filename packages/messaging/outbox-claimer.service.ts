@@ -27,6 +27,11 @@ export const DEFAULT_CLAIMER_CONFIG: ResolvedClaimerConfig = {
 // invalid date, and every claim would throw.
 const MAX_DATE_OFFSET_MS = 8.64e15;
 
+// A stamp value for a log line: a string quoted, anything else by its type, so
+// a Date does not pass for a valid stamp and a BigInt cannot throw.
+const stampShown = (value: unknown): string =>
+  typeof value === 'string' ? JSON.stringify(value) : Object.prototype.toString.call(value).slice(8, -1);
+
 // A rejected value as the caller wrote it: a string from an env-backed config
 // keeps its quotes, so `"60000" (string)` does not pass for the number 60000.
 const shown = (value: unknown): string =>
@@ -76,11 +81,13 @@ export interface TickReport {
   retried: number;
   failed: number;
   /**
-   * Claimed events this worker let go because its claim no longer held them:
-   * the batch had been held longer than `stuckTimeoutMs` by the time the
-   * event's turn came, or another claim took the row over before the outcome
-   * could be recorded. Whoever claims them next delivers them. A steady
-   * non-zero count means batches take longer than `stuckTimeoutMs`.
+   * Claimed events this worker let go without recording an outcome. Either the
+   * batch had been held longer than `stuckTimeoutMs` by the time the event's
+   * turn came, or another claim took the row over before the outcome could be
+   * recorded; whoever claims such an event next delivers it, and a steady
+   * non-zero count means batches take longer than `stuckTimeoutMs`. A row the
+   * store returned without its claim's stamp counts here too, logged as an
+   * error.
    */
   lost: number;
 }
@@ -160,16 +167,22 @@ export class OutboxClaimer {
     return this.settle(event, await this.store.markCompleted(this.db, claim), 'completed');
   }
 
-  /** The claim to publish under, or `undefined` when the store did not stamp the row. */
+  /**
+   * The claim to publish under, or `undefined` when `claimedBy` or `claimedAt`
+   * is not a string: published without a usable stamp, the event would be
+   * delivered with no transition able to record it, and again after every
+   * stuck timeout. Whether a string stamp is the one the claim wrote cannot be
+   * told apart here; that is the store's contract.
+   */
   private claimOf(event: OutboxEventRow): OutboxClaim | undefined {
     const { id, claimedBy, claimedAt } = event;
-    if (claimedBy === null || claimedAt === null) {
-      this.logger.error(
-        `outbox event ${id} came back from claimBatch without claimedBy/claimedAt; a store must return every row it claims with the stamp it wrote`,
-      );
-      return undefined;
+    if (typeof claimedBy === 'string' && typeof claimedAt === 'string') {
+      return { id, claimedBy, claimedAt };
     }
-    return { id, claimedBy, claimedAt };
+    this.logger.error(
+      `outbox event ${id} came back from claimBatch without a string claim stamp (claimedBy ${stampShown(claimedBy)}, claimedAt ${stampShown(claimedAt)}); a store must return every row it claims as its claiming UPDATE left it, with claimedBy and claimedAt as strings`,
+    );
+    return undefined;
   }
 
   /**
@@ -185,7 +198,7 @@ export class OutboxClaimer {
     if (applied) return outcome;
     this.logger.warn(
       reason === undefined
-        ? `outbox event ${event.id} was published, but another claim took it over before it was marked completed; the new owner will publish it again`
+        ? `outbox event ${event.id} was published, but another claim took it over before it was marked completed; the new owner records its outcome and may publish it again`
         : `outbox event ${event.id} failed to publish (${reason}), but another claim took it over before it was marked ${outcome}; leaving it to the new owner`,
     );
     return 'lost';

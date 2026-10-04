@@ -140,8 +140,10 @@ jobs:
           git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'packages/**/*.ts' | tee changed-files.txt
 
       # The three report steps post PR comments. A fork PR's token is read-only,
-      # so they would fail the job with a 403; the numbers still reach the job
-      # summary below.
+      # so they would fail the job with a 403. On a fork PR the job summary below
+      # still shows the coverage totals and the test duration, and the
+      # package-quality artifact keeps the raw coverage, complexity and test data;
+      # only the PR comments compare them with the base branch.
       - name: Coverage Report
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v9

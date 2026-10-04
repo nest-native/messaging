@@ -13,6 +13,79 @@ import { assertValidWakeChannel } from './wake';
 
 type Db = NodePgDatabase<Record<string, never>>;
 
+/** A node-postgres `Pool`, recognized by shape so that loading this module never loads `pg`. */
+interface PgPool {
+  connect(): Promise<PgPoolClient>;
+  totalCount: number;
+}
+interface PgPoolClient {
+  query(text: string): Promise<unknown>;
+  on(event: 'error', listener: (error: Error) => void): unknown;
+  removeListener(event: 'error', listener: (error: Error) => void): unknown;
+  release(error?: Error): void;
+}
+
+const isPgPool = (client: unknown): client is PgPool =>
+  typeof client === 'object' &&
+  client !== null &&
+  typeof (client as Partial<PgPool>).connect === 'function' &&
+  typeof (client as Partial<PgPool>).totalCount === 'number';
+
+/** Where a drizzle database keeps its query logger and cache (drizzle internals, read defensively). */
+interface DrizzleSessionOwner {
+  session?: { options?: { logger?: unknown; cache?: unknown } };
+}
+
+/**
+ * Runs `work` in its own READ COMMITTED transaction, whatever the server
+ * default.
+ *
+ * On a node-postgres `Pool` it checks the client out itself instead of going
+ * through drizzle's `transaction()`, which leaves the checked-out client without
+ * an `error` listener and sends BEGIN outside its cleanup. A connection the
+ * server dropped mid-transaction (a failover, `pg_terminate_backend`) then
+ * crashed the process, and one dropped at BEGIN was never returned to the pool.
+ * Here the client listens for errors while it is out, a failed ROLLBACK never
+ * hides the original error, and a broken connection is released with its error
+ * so the pool discards it. Anything else (PGlite, a single `Client`) goes through
+ * drizzle's `transaction()`.
+ */
+async function readCommitted<T>(db: unknown, work: (tx: Db) => Promise<T>): Promise<T> {
+  const pool = (db as { $client?: unknown }).$client;
+  if (!isPgPool(pool)) {
+    return (db as Db).transaction((tx) => work(tx as unknown as Db), {
+      isolationLevel: 'read committed',
+    });
+  }
+  // The pool is shaped like node-postgres's, so its drizzle driver (and `pg`)
+  // loads here, before a client is checked out. The caller's query logger and
+  // cache carry over, so the store's statements show up where the
+  // application's do.
+  const { drizzle } = await import('drizzle-orm/node-postgres');
+  const { logger, cache } = (db as DrizzleSessionOwner).session?.options ?? {};
+  const client = await pool.connect();
+  let broken: Error | undefined;
+  const onError = (error: Error): void => {
+    broken = error;
+  };
+  client.on('error', onError);
+  let result: T;
+  try {
+    await client.query('begin isolation level read committed');
+    result = await work(drizzle(client as never, { logger, cache } as never) as unknown as Db);
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch((rollbackError: Error) => {
+      broken ??= rollbackError;
+    });
+    throw error;
+  } finally {
+    client.removeListener('error', onError);
+    client.release(broken);
+  }
+  return result;
+}
+
 /**
  * Matches the row only while `claim` still holds it: same row, still
  * `processing`, under exactly the stamp `claimBatch` wrote. A stale worker's
@@ -28,24 +101,18 @@ const heldBy = (claim: OutboxClaim) =>
   );
 
 /**
- * Whether a fenced UPDATE wrote the row. Under a REPEATABLE READ or
- * SERIALIZABLE server default, an UPDATE that waited on a row another claim was
- * taking fails with 40001 once that claim commits, instead of re-checking the
- * fence. The claim is lost either way, so that failure means `false` too.
+ * Runs one fenced transition and reports whether it wrote the row. Each runs in
+ * its own READ COMMITTED transaction, like the claim: under a SERIALIZABLE
+ * server default the fenced UPDATE's scan (on the status index, in steady state)
+ * makes two workers' transitions abort each other (40001) while both claims
+ * still hold their rows. Under READ COMMITTED an UPDATE that waited on a
+ * reclaim re-checks the fence against the committed row instead, so `false`
+ * means the claim really was taken over, and any error is a real one.
  */
-async function wrote(update: PromiseLike<{ id: string }[]>): Promise<boolean> {
-  try {
-    return (await update).length > 0;
-  } catch (error) {
-    if (isSerializationFailure(error)) return false;
-    throw error;
-  }
-}
-
-const isSerializationFailure = (error: unknown): boolean =>
-  [error, (error as { cause?: unknown } | null)?.cause].some(
-    (e) => typeof e === 'object' && e !== null && (e as { code?: unknown }).code === '40001',
-  );
+const fenced = (
+  db: unknown,
+  update: (tx: Db) => PromiseLike<{ id: string }[]>,
+): Promise<boolean> => readCommitted(db, async (tx) => (await update(tx)).length > 0);
 
 export interface PostgresOutboxStoreOptions {
   /**
@@ -103,7 +170,10 @@ export class PostgresOutboxStore implements OutboxStore {
     const now = new Date();
     const nowIso = now.toISOString();
     const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
-    return (db as Db).transaction(async (tx) => {
+    // READ COMMITTED whatever the database default: under REPEATABLE READ or
+    // SERIALIZABLE, a row another worker claims while this scan is running
+    // fails the whole claim (40001) instead of being skipped.
+    return readCommitted(db, async (tx) => {
       const candidates = await tx
         .select({ id: outboxEvents.id })
         .from(outboxEvents)
@@ -129,15 +199,12 @@ export class PostgresOutboxStore implements OutboxStore {
         .set({ status: 'processing', claimedAt: nowIso, claimedBy: cfg.workerInstanceId })
         .where(inArray(outboxEvents.id, ids));
       return tx.select().from(outboxEvents).where(inArray(outboxEvents.id, ids));
-      // Pinned whatever the database default: under REPEATABLE READ or
-      // SERIALIZABLE, a row another worker claims while this scan is running
-      // fails the whole claim (40001) instead of being skipped.
-    }, { isolationLevel: 'read committed' });
+    });
   }
 
   async markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean> {
-    return wrote(
-      (db as Db)
+    return fenced(db, (tx) =>
+      tx
         .update(outboxEvents)
         .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
         .where(heldBy(claim))
@@ -152,8 +219,8 @@ export class PostgresOutboxStore implements OutboxStore {
     lastError?: string,
   ): Promise<boolean> {
     const nextAvailable = new Date(Date.now() + delayMs).toISOString();
-    return wrote(
-      (db as Db)
+    return fenced(db, (tx) =>
+      tx
         .update(outboxEvents)
         .set({
           status: 'pending',
@@ -169,8 +236,8 @@ export class PostgresOutboxStore implements OutboxStore {
   }
 
   async markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean> {
-    return wrote(
-      (db as Db)
+    return fenced(db, (tx) =>
+      tx
         .update(outboxEvents)
         .set({
           status: 'failed',

@@ -381,7 +381,7 @@ describe('OutboxClaimer (claims)', () => {
   };
 
   for (const [outcome, failure, warning] of [
-    ['completed', undefined, 'was published, but another claim took it over before it was marked completed; the new owner will publish it again'],
+    ['completed', undefined, 'was published, but another claim took it over before it was marked completed; the new owner records its outcome and may publish it again'],
     ['retried', new RetryableError('later'), 'failed to publish (later), but another claim took it over before it was marked retried; leaving it to the new owner'],
     ['failed', new PermanentError('no handler'), 'failed to publish (no handler), but another claim took it over before it was marked failed; leaving it to the new owner'],
   ] as const) {
@@ -481,14 +481,20 @@ describe('OutboxClaimer (claims)', () => {
 
   test('a row claimBatch returns without its claim stamp is neither published nor transitioned', async () => {
     const row = new SqliteOutboxStore().enqueue(db, { topic: 't', payload: {} });
-    for (const missing of [{ claimedBy: null }, { claimedAt: null }]) {
-      const unstamped: OutboxEventRow = {
-        ...row,
-        status: 'processing',
-        claimedBy: 'custom-store',
-        claimedAt: new Date().toISOString(),
-        ...missing,
-      };
+    const fresh = new Date().toISOString();
+    for (const [stamp, shown] of [
+      [{ claimedBy: null, claimedAt: fresh }, 'claimedBy Null'],
+      [{ claimedBy: 'custom-store', claimedAt: null }, 'claimedAt Null'],
+      // Rows straight from a driver, whose keys do not match the schema's.
+      [{ claimedBy: undefined, claimedAt: fresh }, 'claimedBy Undefined'],
+      [{ claimedBy: 'custom-store', claimedAt: undefined }, 'claimedAt Undefined'],
+      // Not the string the claim wrote; a Date must not read like one in the log.
+      [{ claimedBy: 'custom-store', claimedAt: new Date() }, 'claimedAt Date'],
+      [{ claimedBy: 'custom-store', claimedAt: Date.now() }, 'claimedAt Number'],
+      [{ claimedBy: 'custom-store', claimedAt: 1n }, 'claimedAt BigInt'],
+      [{ claimedBy: 42, claimedAt: fresh }, 'claimedBy Number'],
+    ] as const) {
+      const unstamped = { ...row, status: 'processing', ...stamp } as unknown as OutboxEventRow;
       // A store that forgets to stamp: only claimBatch exists, so any
       // transition call would throw and fail the test.
       const store = { claimBatch: () => Promise.resolve([unstamped]) } as unknown as OutboxStore;
@@ -499,9 +505,35 @@ describe('OutboxClaimer (claims)', () => {
       } finally {
         logs.restore();
       }
-      assert.match(logs.errors[0] ?? '', /without claimedBy\/claimedAt/);
+      assert.match(logs.errors[0] ?? '', /without a string claim stamp/);
+      assert.ok(logs.errors[0]?.includes(shown), `${shown} in ${logs.errors[0]}`);
     }
     assert.equal(transport.list().length, 0);
+  });
+
+  test('a store that stamps claims in its own format is published under that stamp', async () => {
+    // The claimer cannot judge a stamp's format or clock, so it does not try:
+    // the store's own transitions match the stamp it wrote.
+    const row = await app.get(WidgetService).create('own-format');
+    const real = new SqliteOutboxStore();
+    const store: OutboxStore = {
+      enqueue: (handle, input) => real.enqueue(handle, input),
+      claimBatch: async (handle, cfg) => {
+        const claimed = await real.claimBatch(handle, cfg);
+        return claimed.map((claimedRow) => {
+          const claimedAt = '2026-10-04 12:00:00.123';
+          db.update(outboxEvents).set({ claimedAt }).where(eq(outboxEvents.id, claimedRow.id)).run();
+          return { ...claimedRow, claimedAt };
+        });
+      },
+      markCompleted: (handle, claim) => real.markCompleted(handle, claim),
+      retry: (handle, claim, delayMs, lastError) => real.retry(handle, claim, delayMs, lastError),
+      markFailed: (handle, claim, reason) => real.markFailed(handle, claim, reason),
+    };
+    const report = await new OutboxClaimer(db, store, transport).tick();
+    assert.deepEqual(report, { claimed: 1, completed: 1, retried: 0, failed: 0, lost: 0 });
+    assert.equal(fetchRow(row.id)?.status, 'completed');
+    assert.equal(transport.list().length, 1);
   });
 });
 

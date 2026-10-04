@@ -23,13 +23,41 @@ package release is useful for users.
   - Every transition applies only while the row is still `processing` under the
     exact claim that took it: its `claimedBy` and `claimedAt`. This holds even
     when two loops share a `workerInstanceId`. A transition that loses this race
-    writes nothing; on Postgres that includes the serialization failure a
-    stricter server default raises.
+    writes nothing.
+  - On Postgres each transition also runs in its own READ COMMITTED
+    transaction. Under a SERIALIZABLE server default, two workers' transitions
+    would otherwise abort each other while both claims still held their rows,
+    and the events would be published again.
   - Once a batch has been held longer than `stuckTimeoutMs`, the worker skips
     its remaining events instead of publishing them again. The first event of a
     batch is always published, so a slow claim still makes progress.
-  - Both cases count in the new `TickReport.lost` and are logged with the
-    publish error.
+  - A transition that lost its claim and an event skipped from an expired batch
+    both count in the new `TickReport.lost`, and each logs a warning, with the
+    publish error when there was one.
+  - Give every worker on one outbox table the same `stuckTimeoutMs`, longer
+    than the slowest single publish, and keep their clocks in sync. Each worker
+    reclaims rows by its own clock and its own value, so the smallest value in
+    the fleet is the one in force.
+- **Upgrade every worker on a table together.** These guarantees hold once
+  every worker draining a table runs this version: a 0.7.x worker can still
+  take over a newer worker's claim, and then both publish the event. Stop the
+  0.7.x workers before starting the new ones, or expect duplicates and `lost`
+  warnings while both run. The schema is unchanged.
+- **The outbox claim no longer crashes the process when the database drops
+  its connection.** The claim ran through drizzle's `transaction()`, which
+  leaves the checked-out client without an `error` listener and sends BEGIN
+  outside its cleanup: a failover, a restart or `pg_terminate_backend` during a
+  claim killed the process, and a connection lost at BEGIN was never returned
+  to the pool. On a node-postgres `Pool` the Postgres store now checks the
+  client out itself, for the claim and for each transition. It listens for
+  errors while the client is out, rolls back without hiding the original
+  error, and returns a broken client with its error so the pool discards it.
+  The call rejects instead, and `runWorkerLoop` reports it through `onError`.
+  As node-postgres requires of every pool, give the pool an `error` listener.
+  The inbox and your own `@Transactional` bodies still go through drizzle's
+  `transaction()`; a per-client listener
+  (`pool.on('connect', (client) => client.on('error', handle))`) keeps a
+  dropped connection there from crashing the process too.
 - **Failing to record a delivery no longer retries a published event.** A
   database error from `markCompleted` was handled like a failed publish: it
   spent an attempt, and on the last one marked the delivered event failed.
@@ -38,9 +66,15 @@ package release is useful for users.
 - **A `ClaimerConfig` field set to `undefined` keeps its default.**
   `{ workerInstanceId: process.env.WORKER_ID }` with the variable unset used to
   claim rows under no owner.
-  - Invalid values now throw. A numeric string from an env-backed config is
-    named as a string in the error.
-  - `runWorkerLoop` rejects at once instead of failing every tick.
+  - **Breaking:** invalid values now throw, numeric strings included. 0.7.x
+    accepted them: the timeouts and backoffs worked through arithmetic, but a
+    string `batchSize` dropped the claim's LIMIT, so each claim took every due
+    row. Pass numbers, and leave a field `undefined` to keep its default:
+    `batchSize: env.BATCH_SIZE ? Number(env.BATCH_SIZE) : undefined`. The error
+    names a string as a string.
+  - `runWorkerLoop` rejects at once instead of failing every tick. Keep its
+    promise and handle that rejection: discarded with `void`, it ends the
+    process as an unhandled rejection, without reaching `onError`.
   - `resolveClaimerConfig()` is exported, so a worker can check its config at
     startup.
 - **Breaking for custom `OutboxStore` implementations.**
@@ -49,12 +83,16 @@ package release is useful for users.
   - They resolve `true` when they wrote the row and `false` when the claim no
     longer held it.
   - `claimBatch` must never return one row to two concurrent callers, and must
-    return every row with the `claimedBy` and `claimedAt` it wrote: a row read
-    before the claim's own UPDATE is never published.
+    return every row as its claiming UPDATE left it, with the `claimedBy` and
+    `claimedAt` it wrote. The claimer refuses a row without a string stamp,
+    counting it as lost with an error, but it cannot tell a stale stamp from a
+    fresh one: a store that returns rows as read before its UPDATE gets each
+    reclaimed event published again after every stuck timeout.
   - The shipped stores are updated.
-- **MySQL 8.0.1 or later is now required**, for `SKIP LOCKED`, with row-based
-  or mixed binary logging (the MySQL 8 default). READ COMMITTED transactions
-  cannot write under `binlog_format=STATEMENT`.
+- **Breaking: MySQL 8.0.1 or later is now required**, for `SKIP LOCKED`. With
+  binary logging on, `binlog_format` must also be ROW (the MySQL 8 default) or
+  MIXED: InnoDB refuses writes from the claim's READ COMMITTED transaction
+  under `binlog_format=STATEMENT`.
 - **CI no longer fails a fork's pull request** on the report steps that post PR
   comments.
 

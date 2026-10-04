@@ -93,10 +93,16 @@ export type RunOnceOutcome = 'processed' | 'duplicate';
  *
  * `claimBatch` must be atomic across workers: two concurrent calls never return
  * the same row (the shipped Postgres and MySQL stores use `FOR UPDATE SKIP
- * LOCKED`). It stamps every row it returns with `claimedBy` and `claimedAt`.
- * The three transitions take that stamp back as an {@link OutboxClaim} and
+ * LOCKED`). It stamps every row it returns with `claimedBy` and `claimedAt`, and
+ * returns each row as that UPDATE left it. The claimer refuses a row without a
+ * string stamp, but it cannot tell a stale stamp from the one the claim wrote:
+ * a reclaimed row read before the UPDATE carries the previous claim's stamp,
+ * and is published under a claim no transition matches, again after every
+ * stuck timeout.
+ * The three transitions take the stamp back as an {@link OutboxClaim} and
  * apply only while the row still holds it, resolving `false` (and writing
- * nothing) once the claim has been taken over.
+ * nothing) once the claim has been taken over. A database error rejects; it
+ * never reads as `false`.
  */
 export interface OutboxStore {
   enqueue(db: unknown, input: EnqueueInput<object>): OutboxEventRow | Promise<OutboxEventRow>;
