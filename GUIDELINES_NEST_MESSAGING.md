@@ -42,7 +42,8 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
   the application's own connection.
 - Support line: Node `>=22` (`>=22.12` on the NestJS 12 end — see section 3),
   NestJS `^11.0.0 || ^12.0.0`, Drizzle `0.44`/`0.45`,
-  `@nestjs-cls/transactional` `3.x`, `better-sqlite3` `11.x`/`12.x`/`13.x`.
+  `@nestjs-cls/transactional` `3.x`/`4.x` (4.x with `nestjs-cls` 7),
+  `better-sqlite3` `11.x`/`12.x`/`13.x`.
   **Peer majors are widened, never swapped**: the devDependency stays on the
   newest major that still installs on the OLDEST supported Node (today 12.x,
   because `better-sqlite3` 13 requires Node `>=22`), and a dedicated CI leg

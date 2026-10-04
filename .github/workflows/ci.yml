@@ -227,6 +227,67 @@ jobs:
       - name: Run the suite against better-sqlite3 13
         run: npm test
 
+  nestjs-cls-latest-major:
+    name: nestjs-cls 7 / transactional 4 compatibility (Node 22)
+    runs-on: ubuntu-latest
+    # The published peer range allows @nestjs-cls/transactional ^3 || ^4. The
+    # devDependencies stay on transactional 3 / nestjs-cls 6, which most apps
+    # still run; this leg resolves the 4.x set (transactional 4 needs
+    # nestjs-cls 7 and the Drizzle adapter 2) and runs the suite, whose engine
+    # specs boot a Nest app with the transactional plugin, the package build
+    # and the sample matrix, so the 4.x end of the range is a tested claim.
+    #
+    # Like the NestJS legs below, it resolves fresh from a throwaway checkout:
+    # the samples' hoisted Drizzle adapter 1.x peers transactional 3, so the set
+    # cannot be layered over the lockfile, and a root-only install would leave
+    # the samples on nested 3.x copies. Nothing is written back.
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management
+        env:
+          RABBITMQ_DEFAULT_USER: messaging
+          RABBITMQ_DEFAULT_PASS: messaging
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Resolve the tree against nestjs-cls 7 / transactional 4 (this job only, never saved)
+        run: |
+          rm package-lock.json
+          npm install --no-save --workspaces --include-workspace-root \
+            "nestjs-cls@^7.0.0" \
+            "@nestjs-cls/transactional@^4.0.0" \
+            "@nestjs-cls/transactional-adapter-drizzle-orm@^2.0.0"
+
+      - name: Prove every workspace resolves the 4.x set
+        run: >-
+          node scripts/check-nestjs-resolution.mjs
+          nestjs-cls@^7.0.0
+          @nestjs-cls/transactional@^4.0.0
+          @nestjs-cls/transactional-adapter-drizzle-orm@^2.0.0
+
+      - name: Run the suite against the 4.x set
+        run: npm test
+
+      - name: Build the package against the 4.x set
+        run: npm run build --workspace @nest-native/messaging
+
+      - name: Run the sample matrix against the 4.x set
+        env:
+          RABBITMQ_URL: amqp://messaging:messaging@127.0.0.1:5672
+          RABBITMQ_MANAGEMENT_URL: http://messaging:messaging@127.0.0.1:15672
+        run: npm run ci:sample
+
   nestjs-compat:
     name: NestJS ${{ matrix.nest.label }} compatibility (Node 22)
     runs-on: ubuntu-latest
