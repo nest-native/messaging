@@ -245,7 +245,7 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
 - NestJS naming + DI conventions; full enhancer-pipeline compatibility for the
   Kafka consumer base.
 - 100% test coverage (branches/functions/lines/statements) on the core package;
-  SonarJS cognitive complexity ≤ 15 per function.
+  cognitive complexity ≤ 15 per function (Biome, `biome.json`).
 - Tests cover every dialect (sqlite, pg, mysql) and the Kafka path via the
   in-memory broker; gated real-service specs prove the round-trip on MySQL and
   Postgres, and on RabbitMQ: exactly-once under redelivery, unroutable and
