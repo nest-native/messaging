@@ -8,6 +8,8 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.8.1 - 2026-10-04
+
 - **`@nestjs-cls/transactional` 4 is supported.** The peer range is now
   `^3.0.0 || ^4.0.0`; transactional 4 needs `nestjs-cls` 7 and, for Drizzle,
   `@nestjs-cls/transactional-adapter-drizzle-orm` 2. Their only breaking change
