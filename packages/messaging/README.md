@@ -78,7 +78,8 @@ import { OutboxWaker, runWorkerLoop } from '@nest-native/messaging';
 const waker = new OutboxWaker();
 
 // worker: the idle wait is now woken early by notify()
-runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal });
+runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal })
+  .catch((error) => console.error('claimer worker stopped', error));
 
 // request path: notify AFTER the transaction commits (before commit the row
 // isn't visible to the claimer's own transaction yet)
@@ -100,7 +101,8 @@ database — an in-memory `notify()` can't cross the boundary. The
 const waker = new OutboxWaker();
 const wakeServer = new WakeSocketServer({ path: env.outboxWakeSocket, waker });
 await wakeServer.listen(); // recovers a stale path left by a crashed worker
-runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal });
+runWorkerLoop(claimer, { pollIntervalMs: 2_000, waker, signal })
+  .catch((error) => console.error('claimer worker stopped', error));
 
 // app process — same path, fire-and-forget after the commit
 const wake = new WakeSocketClient({ path: env.outboxWakeSocket });
@@ -142,7 +144,7 @@ whole story anyway — its processes share one machine by definition).
 
 ## Status & scope
 
-- **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL (`mysql2`, async) via per-dialect stores.
+- **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL 8.0.1+ (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and RabbitMQ (`amqplib`) — see [RabbitMQ](https://nest-native.dev/messaging/docs/rabbitmq).
 - **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; the wake tiers cut that idle wait — `OutboxWaker` in-process, the `WakeSocket` pair across processes on one machine, and Postgres `LISTEN`/`NOTIFY` across machines (see above).
 - **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.

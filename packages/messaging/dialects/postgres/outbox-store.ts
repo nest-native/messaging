@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { Logger } from '@nestjs/common';
 import { and, eq, inArray, lte, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type {
   EnqueueInput,
+  OutboxClaim,
   OutboxEventRow,
   OutboxStore,
   ResolvedClaimerConfig,
@@ -11,6 +13,127 @@ import { outboxEvents } from './schema';
 import { assertValidWakeChannel } from './wake';
 
 type Db = NodePgDatabase<Record<string, never>>;
+
+/** A node-postgres `Pool`, recognized by shape so that loading this module never loads `pg`. */
+interface PgPool {
+  connect(): Promise<PgPoolClient>;
+  totalCount: number;
+  listenerCount?(event: 'error'): number;
+}
+interface PgPoolClient {
+  query(text: string): Promise<unknown>;
+  on(event: 'error', listener: (error: Error) => void): unknown;
+  removeListener(event: 'error', listener: (error: Error) => void): unknown;
+  release(error?: Error): void;
+}
+
+const isPgPool = (client: unknown): client is PgPool =>
+  typeof client === 'object' &&
+  client !== null &&
+  typeof (client as Partial<PgPool>).connect === 'function' &&
+  typeof (client as Partial<PgPool>).totalCount === 'number';
+
+const logger = new Logger('PostgresOutboxStore');
+// Pools already warned that they have no `error` listener.
+const unguardedPools = new WeakSet<object>();
+
+/**
+ * Warns once per pool that has no `error` listener. node-postgres reports a
+ * connection an idle client loses as the pool's `error` event, and with no
+ * listener that event crashes the process: every client the store releases
+ * goes back into that state, so the listener is load-bearing.
+ */
+function warnIfUnguarded(pool: PgPool): void {
+  if (unguardedPools.has(pool) || pool.listenerCount?.('error') !== 0) return;
+  unguardedPools.add(pool);
+  logger.warn(
+    "the node-postgres Pool the outbox store runs on has no 'error' listener; node-postgres crashes the process when an idle client loses its connection, so add pool.on('error', ...)",
+  );
+}
+
+/** Where a drizzle database keeps its query logger and cache (drizzle internals, read defensively). */
+interface DrizzleSessionOwner {
+  session?: { options?: { logger?: unknown; cache?: unknown } };
+}
+
+/**
+ * Runs `work` in its own READ COMMITTED transaction, whatever the server
+ * default.
+ *
+ * On a node-postgres `Pool` it checks the client out itself instead of going
+ * through drizzle's `transaction()`, which leaves the checked-out client without
+ * an `error` listener and sends BEGIN outside its cleanup. A connection the
+ * server dropped mid-transaction (a failover, `pg_terminate_backend`) then
+ * crashed the process, and one dropped at BEGIN was never returned to the pool.
+ * Here the client listens for errors while it is out, a failed ROLLBACK never
+ * hides the original error, and a broken connection is released with its error
+ * so the pool discards it. Anything else (PGlite, a single `Client`) goes through
+ * drizzle's `transaction()`.
+ */
+async function readCommitted<T>(db: unknown, work: (tx: Db) => Promise<T>): Promise<T> {
+  const pool = (db as { $client?: unknown }).$client;
+  if (!isPgPool(pool)) {
+    return (db as Db).transaction((tx) => work(tx as unknown as Db), {
+      isolationLevel: 'read committed',
+    });
+  }
+  warnIfUnguarded(pool);
+  // The pool is shaped like node-postgres's, so its drizzle driver (and `pg`)
+  // loads here, before a client is checked out. The caller's query logger and
+  // cache carry over, so the store's statements show up where the
+  // application's do.
+  const { drizzle } = await import('drizzle-orm/node-postgres');
+  const { logger, cache } = (db as DrizzleSessionOwner).session?.options ?? {};
+  const client = await pool.connect();
+  let broken: Error | undefined;
+  const onError = (error: Error): void => {
+    broken = error;
+  };
+  client.on('error', onError);
+  let result: T;
+  try {
+    await client.query('begin isolation level read committed');
+    result = await work(drizzle(client as never, { logger, cache } as never) as unknown as Db);
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback').catch((rollbackError: Error) => {
+      broken ??= rollbackError;
+    });
+    throw error;
+  } finally {
+    client.removeListener('error', onError);
+    client.release(broken);
+  }
+  return result;
+}
+
+/**
+ * Matches the row only while `claim` still holds it: same row, still
+ * `processing`, under exactly the stamp `claimBatch` wrote. A stale worker's
+ * transition then matches nothing — whether another worker reclaimed the row or
+ * a later claim reused the same `workerInstanceId`.
+ */
+const heldBy = (claim: OutboxClaim) =>
+  and(
+    eq(outboxEvents.id, claim.id),
+    eq(outboxEvents.status, 'processing'),
+    eq(outboxEvents.claimedBy, claim.claimedBy),
+    eq(outboxEvents.claimedAt, claim.claimedAt),
+  );
+
+/**
+ * Runs one fenced transition and reports whether it wrote the row. Each runs in
+ * its own READ COMMITTED transaction, like the claim: under a SERIALIZABLE
+ * server default the fenced UPDATE's scan (on the status index, in steady state)
+ * makes two workers' transitions abort each other (40001) while both claims
+ * still hold their rows. Under READ COMMITTED an UPDATE that waited on a
+ * reclaim re-checks the fence against the committed row instead, so `false`
+ * means the claim really was taken over, and any error is a real one.
+ */
+const fenced = (
+  db: unknown,
+  update: (tx: Db) => PromiseLike<{ id: string }[]>,
+): Promise<boolean> => readCommitted(db, async (tx) => (await update(tx)).length > 0);
 
 export interface PostgresOutboxStoreOptions {
   /**
@@ -68,7 +191,10 @@ export class PostgresOutboxStore implements OutboxStore {
     const now = new Date();
     const nowIso = now.toISOString();
     const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
-    return (db as Db).transaction(async (tx) => {
+    // READ COMMITTED whatever the database default: under REPEATABLE READ or
+    // SERIALIZABLE, a row another worker claims while this scan is running
+    // fails the whole claim (40001) instead of being skipped.
+    return readCommitted(db, async (tx) => {
       const candidates = await tx
         .select({ id: outboxEvents.id })
         .from(outboxEvents)
@@ -97,43 +223,51 @@ export class PostgresOutboxStore implements OutboxStore {
     });
   }
 
-  async markCompleted(db: unknown, id: string, claimedBy: string): Promise<void> {
-    await (db as Db)
-      .update(outboxEvents)
-      .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+  async markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean> {
+    return fenced(db, (tx) =>
+      tx
+        .update(outboxEvents)
+        .set({ status: 'completed', processedAt: new Date().toISOString(), lastError: null })
+        .where(heldBy(claim))
+        .returning({ id: outboxEvents.id }),
+    );
   }
 
   async retry(
     db: unknown,
-    id: string,
+    claim: OutboxClaim,
     delayMs: number,
-    lastError: string | undefined,
-    claimedBy: string,
-  ): Promise<void> {
+    lastError?: string,
+  ): Promise<boolean> {
     const nextAvailable = new Date(Date.now() + delayMs).toISOString();
-    await (db as Db)
-      .update(outboxEvents)
-      .set({
-        status: 'pending',
-        attempts: sql`${outboxEvents.attempts} + 1`,
-        availableAt: nextAvailable,
-        claimedAt: null,
-        claimedBy: null,
-        lastError: lastError ?? null,
-      })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+    return fenced(db, (tx) =>
+      tx
+        .update(outboxEvents)
+        .set({
+          status: 'pending',
+          attempts: sql`${outboxEvents.attempts} + 1`,
+          availableAt: nextAvailable,
+          claimedAt: null,
+          claimedBy: null,
+          lastError: lastError ?? null,
+        })
+        .where(heldBy(claim))
+        .returning({ id: outboxEvents.id }),
+    );
   }
 
-  async markFailed(db: unknown, id: string, reason: string, claimedBy: string): Promise<void> {
-    await (db as Db)
-      .update(outboxEvents)
-      .set({
-        status: 'failed',
-        attempts: sql`${outboxEvents.attempts} + 1`,
-        lastError: reason,
-        processedAt: new Date().toISOString(),
-      })
-      .where(and(eq(outboxEvents.id, id), eq(outboxEvents.claimedBy, claimedBy)));
+  async markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean> {
+    return fenced(db, (tx) =>
+      tx
+        .update(outboxEvents)
+        .set({
+          status: 'failed',
+          attempts: sql`${outboxEvents.attempts} + 1`,
+          lastError: reason,
+          processedAt: new Date().toISOString(),
+        })
+        .where(heldBy(claim))
+        .returning({ id: outboxEvents.id }),
+    );
   }
 }

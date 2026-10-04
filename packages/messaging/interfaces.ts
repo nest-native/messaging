@@ -59,7 +59,14 @@ export interface ResolvedClaimerConfig {
   baseBackoffMs: number;
   maxBackoffMs: number;
 }
-export type ClaimerConfig = Partial<ResolvedClaimerConfig>;
+/**
+ * Overrides for {@link ResolvedClaimerConfig}. A field may be `undefined`
+ * explicitly — `{ workerInstanceId: process.env.WORKER_ID }` — even under
+ * `exactOptionalPropertyTypes`; an undefined field keeps its default.
+ */
+export type ClaimerConfig = {
+  [K in keyof ResolvedClaimerConfig]?: ResolvedClaimerConfig[K] | undefined;
+};
 
 /**
  * The DB side effect `runOnce` applies exactly once, inside the dedup
@@ -83,13 +90,40 @@ export type RunOnceOutcome = 'processed' | 'duplicate';
  * `enqueue` accepts `EnqueueInput<object>` so any structurally-typed payload
  * (every `EnqueueInput<TPayload>`) flows through; the store widens the payload
  * to the stored `Record<string, unknown>` shape internally.
+ *
+ * `claimBatch` must be atomic across workers: two concurrent calls never return
+ * the same row (the shipped Postgres and MySQL stores use `FOR UPDATE SKIP
+ * LOCKED`). It stamps every row it returns with `claimedBy` and `claimedAt`, and
+ * returns each row as that UPDATE left it. The claimer refuses a row without a
+ * string stamp, but it cannot tell a stale stamp from the one the claim wrote:
+ * a reclaimed row read before the UPDATE carries the previous claim's stamp,
+ * and is published under a claim no transition matches, again after every
+ * stuck timeout.
+ * The three transitions take the stamp back as an {@link OutboxClaim} and
+ * apply only while the row still holds it, resolving `false` (and writing
+ * nothing) once the claim has been taken over. A database error rejects; it
+ * never reads as `false`.
  */
 export interface OutboxStore {
   enqueue(db: unknown, input: EnqueueInput<object>): OutboxEventRow | Promise<OutboxEventRow>;
   claimBatch(db: unknown, cfg: ResolvedClaimerConfig): Promise<OutboxEventRow[]>;
-  markCompleted(db: unknown, id: string, claimedBy: string): Promise<void>;
-  retry(db: unknown, id: string, delayMs: number, lastError: string | undefined, claimedBy: string): Promise<void>;
-  markFailed(db: unknown, id: string, reason: string, claimedBy: string): Promise<void>;
+  markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean>;
+  retry(db: unknown, claim: OutboxClaim, delayMs: number, lastError?: string): Promise<boolean>;
+  markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean>;
+}
+
+/**
+ * The claim an outbox transition must still hold: the row's `id` plus the
+ * stamp `claimBatch` wrote. A transition matches the row only while it is
+ * `processing` under exactly this `claimedBy` and `claimedAt`, so a worker
+ * whose claim was taken over after the stuck timeout — by another worker, or by
+ * a later claim under the same `workerInstanceId` — can never overwrite the new
+ * owner's outcome.
+ */
+export interface OutboxClaim {
+  readonly id: string;
+  readonly claimedBy: string;
+  readonly claimedAt: string;
 }
 
 /**

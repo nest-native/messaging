@@ -170,7 +170,9 @@ export class OrderService {
 `OutboxClaimer` claims committed rows in batches and publishes each through the
 transport. Run it in a background loop with `runWorkerLoop`; it drains the
 backlog, then polls when idle, and keeps going if a tick throws. Stop it by
-aborting the signal on shutdown.
+aborting the signal on shutdown. Its promise rejects when the claimer config is
+invalid, before the first tick, or if `onError` itself throws, so handle that
+rather than discarding the promise.
 
 ```ts title="worker.ts"
 import { OutboxClaimer, runWorkerLoop } from '@nest-native/messaging';
@@ -178,7 +180,7 @@ import { OutboxClaimer, runWorkerLoop } from '@nest-native/messaging';
 const claimer = app.get(OutboxClaimer);
 const controller = new AbortController();
 
-void runWorkerLoop(claimer, {
+runWorkerLoop(claimer, {
   pollIntervalMs: 1_000,
   signal: controller.signal,
   onTick: (report) => {
@@ -187,7 +189,7 @@ void runWorkerLoop(claimer, {
     }
   },
   onError: (error) => console.error('claimer tick failed', error),
-});
+}).catch((error) => console.error('claimer worker stopped', error));
 
 // on graceful shutdown:
 // controller.abort();

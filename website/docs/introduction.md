@@ -80,8 +80,8 @@ or the [API Reference](./api-reference.md) for the full surface.
 ## Status and scope
 
 - **Drivers:** SQLite (better-sqlite3, synchronous), Postgres (`pg`,
-  asynchronous), and MySQL (`mysql2`, asynchronous) via per-dialect stores. You
-  may provide your own store.
+  asynchronous), and MySQL 8.0.1+ (`mysql2`, asynchronous) via per-dialect
+  stores. You may provide your own store.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no
   broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and
   RabbitMQ (`amqplib`), plus an in-memory one for tests.
