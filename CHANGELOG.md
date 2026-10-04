@@ -8,6 +8,8 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.8.2 - 2026-10-04
+
 - **A failed transition no longer strands the rest of the batch.** When
   recording an outcome fails (the database went away mid-batch), the tick
   throws, and the batch's unpublished rows used to wait out `stuckTimeoutMs`

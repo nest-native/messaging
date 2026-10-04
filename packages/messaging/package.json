@@ -1,6 +1,6 @@
 {
   "name": "@nest-native/messaging",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Transactional outbox + idempotent inbox for NestJS, persisted with Drizzle ORM (SQLite, Postgres + MySQL), with a Kafka transport",
   "keywords": [
     "nestjs",
