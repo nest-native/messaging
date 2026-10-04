@@ -8,6 +8,8 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.8.0 - 2026-10-04
+
 - **Concurrent workers no longer publish the same outbox event twice** (#62).
   On Postgres and MySQL, two workers claiming at the same moment could both
   select the same pending rows and both publish them. A worker whose stalled
