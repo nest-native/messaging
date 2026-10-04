@@ -479,6 +479,114 @@ describe('OutboxClaimer (claims)', () => {
     assert.equal(transport.list().length, 1);
   });
 
+  // A store whose first markCompleted fails, as a dropped connection would,
+  // and whose `release` is the real one unless `release` says otherwise.
+  const failingFirstCompletion = (release?: OutboxStore['release'] | null): OutboxStore => {
+    const real = new SqliteOutboxStore();
+    let completions = 0;
+    return {
+      enqueue: (handle, input) => real.enqueue(handle, input),
+      claimBatch: (handle, cfg) => real.claimBatch(handle, cfg),
+      markCompleted: (handle, claim) =>
+        (completions += 1) === 1
+          ? Promise.reject(new Error('database went away'))
+          : real.markCompleted(handle, claim),
+      retry: (handle, claim, delayMs, lastError) => real.retry(handle, claim, delayMs, lastError),
+      markFailed: (handle, claim, reason) => real.markFailed(handle, claim, reason),
+      ...(release === null ? {} : { release: release ?? ((handle, claim) => real.release(handle, claim)) }),
+    };
+  };
+
+  test('a failed transition hands the unpublished rest of the batch back for the next claim', async () => {
+    const rows = [
+      await app.get(WidgetService).create('first'),
+      await app.get(WidgetService).create('second'),
+      await app.get(WidgetService).create('third'),
+    ];
+    const logs = captureLogs();
+    try {
+      await assert.rejects(
+        new OutboxClaimer(db, failingFirstCompletion(), transport).tick(),
+        /database went away/,
+      );
+    } finally {
+      logs.restore();
+    }
+    const [published] = transport.list();
+    assert.equal(transport.list().length, 1);
+    // The published one stays claimed: handing it back would publish it again at once.
+    assert.equal(fetchRow(published!.id)?.status, 'processing');
+    for (const row of rows.filter((r) => r.id !== published!.id)) {
+      const after = fetchRow(row.id);
+      assert.equal(after?.status, 'pending');
+      assert.equal(after?.claimedBy, null);
+      assert.equal(after?.attempts, 0);
+    }
+    assert.deepEqual(logs.warns, [
+      'handed back 2 unpublished outbox event(s) after a failed transition, for the next claim to take',
+    ]);
+    // The next claim takes them straight away, without waiting for the stuck timeout.
+    assert.equal((await app.get(OutboxClaimer).tick()).completed, 2);
+  });
+
+  test('without a store release, the rest of the batch waits for the stuck timeout', async () => {
+    const rows = [
+      await app.get(WidgetService).create('first'),
+      await app.get(WidgetService).create('second'),
+    ];
+    await assert.rejects(
+      new OutboxClaimer(db, failingFirstCompletion(null), transport).tick(),
+      /database went away/,
+    );
+    assert.deepEqual(
+      rows.map((row) => fetchRow(row.id)?.status),
+      ['processing', 'processing'],
+    );
+  });
+
+  test('a release that fails too keeps the original error', async () => {
+    await app.get(WidgetService).create('first');
+    await app.get(WidgetService).create('second');
+    const logs = captureLogs();
+    try {
+      await assert.rejects(
+        new OutboxClaimer(
+          db,
+          failingFirstCompletion(() => Promise.reject(new Error('still down'))),
+          transport,
+        ).tick(),
+        /database went away/,
+      );
+    } finally {
+      logs.restore();
+    }
+    assert.deepEqual(logs.warns, [
+      'could not hand back 1 unpublished outbox event(s) after a failed transition (still down); they are reclaimed after stuckTimeoutMs',
+    ]);
+  });
+
+  test('a row without a claim stamp is not handed back', async () => {
+    // The stamp check runs before release, so a store that forgot to stamp
+    // cannot be asked to match nothing.
+    const row = new SqliteOutboxStore().enqueue(db, { topic: 't', payload: {} });
+    const unstamped = { ...row, status: 'processing', claimedBy: null, claimedAt: null } as unknown as OutboxEventRow;
+    const real = new SqliteOutboxStore();
+    let released = 0;
+    const store: OutboxStore = {
+      enqueue: (handle, input) => real.enqueue(handle, input),
+      claimBatch: async (handle, cfg) => [...(await real.claimBatch(handle, cfg)), unstamped],
+      markCompleted: () => Promise.reject(new Error('database went away')),
+      retry: (handle, claim, delayMs, lastError) => real.retry(handle, claim, delayMs, lastError),
+      markFailed: (handle, claim, reason) => real.markFailed(handle, claim, reason),
+      release: () => {
+        released += 1;
+        return Promise.resolve(true);
+      },
+    };
+    await assert.rejects(new OutboxClaimer(db, store, transport).tick(), /database went away/);
+    assert.equal(released, 0);
+  });
+
   test('a row claimBatch returns without its claim stamp is neither published nor transitioned', async () => {
     const row = new SqliteOutboxStore().enqueue(db, { topic: 't', payload: {} });
     const fresh = new Date().toISOString();

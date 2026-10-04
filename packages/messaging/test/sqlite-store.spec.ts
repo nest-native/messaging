@@ -183,12 +183,26 @@ describe('SqliteOutboxStore', () => {
     assert.equal(after?.attempts, 1);
   });
 
+  test('release hands a held row back pending and unclaimed, attempts untouched', async () => {
+    const row = store.enqueue(db, { topic: 't', payload: {} });
+    const [mine] = await store.claimBatch(db, cfg);
+    assert.equal(await store.release(db, claimOf(mine!)), true);
+    const after = fetch(row.id);
+    assert.equal(after?.status, 'pending');
+    assert.equal(after?.claimedBy, null);
+    assert.equal(after?.claimedAt, null);
+    assert.equal(after?.attempts, 0);
+    assert.equal(after?.availableAt, row.availableAt);
+    assert.equal(await store.release(db, claimOf(mine!)), false);
+  });
+
   test('#62: a worker whose stuck claim was taken over cannot move the row', async () => {
     const row = store.enqueue(db, { topic: 't', payload: {} });
     const [mine] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-A' });
     backdate(row.id);
     const [theirs] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-B' });
     const owned = fetch(row.id);
+    assert.equal(await store.release(db, claimOf(mine!)), false);
     assert.equal(await store.markCompleted(db, claimOf(mine!)), false);
     assert.equal(await store.retry(db, claimOf(mine!), 0, 'late'), false);
     assert.equal(await store.markFailed(db, claimOf(mine!), 'late'), false);

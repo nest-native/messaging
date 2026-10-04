@@ -110,6 +110,15 @@ export interface OutboxStore {
   markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean>;
   retry(db: unknown, claim: OutboxClaim, delayMs: number, lastError?: string): Promise<boolean>;
   markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean>;
+  /**
+   * Optional. Hands a claimed row back untouched while the claim still holds
+   * it: `pending` and unclaimed, with its attempts and due time unchanged.
+   * Resolves `false` once the claim has been taken over. The claimer calls it
+   * for the batch's unpublished rows when recording an outcome failed, so they
+   * are available again at once instead of after `stuckTimeoutMs`; a store
+   * without it leaves them to the stuck timeout.
+   */
+  release?(db: unknown, claim: OutboxClaim): Promise<boolean>;
 }
 
 /**

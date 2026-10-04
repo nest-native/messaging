@@ -42,7 +42,7 @@ const cfg = { ...DEFAULT_CLAIMER_CONFIG, batchSize: 10, stuckTimeoutMs: 1_000 };
  * whose one client runs every statement on the in-process PGlite and records
  * the statements and how it was released. `failOn` makes a statement fail.
  */
-function pglitePool() {
+function pglitePool(connectDelayMs = 0) {
   const statements: string[] = [];
   const releases: (Error | undefined)[] = [];
   let failing: (text: string) => Error | undefined = () => undefined;
@@ -60,7 +60,10 @@ function pglitePool() {
       releases.push(error);
     },
   });
-  const pool = { totalCount: 1, connect: () => Promise.resolve(client) };
+  const pool = {
+    totalCount: 1,
+    connect: () => new Promise((resolve) => setTimeout(() => resolve(client), connectDelayMs)),
+  };
   return {
     db: drizzleNodePg(pool as never),
     pool,
@@ -199,12 +202,26 @@ describe('PostgresOutboxStore', () => {
     assert.equal(after?.attempts, 1);
   });
 
+  test('release hands a held row back pending and unclaimed, attempts untouched', async () => {
+    const row = await store.enqueue(db, { topic: 't', payload: {} });
+    const [mine] = await store.claimBatch(db, cfg);
+    assert.equal(await store.release(db, claimOf(mine!)), true);
+    const after = await fetch(row.id);
+    assert.equal(after?.status, 'pending');
+    assert.equal(after?.claimedBy, null);
+    assert.equal(after?.claimedAt, null);
+    assert.equal(after?.attempts, 0);
+    assert.equal(after?.availableAt, row.availableAt);
+    assert.equal(await store.release(db, claimOf(mine!)), false);
+  });
+
   test('#62: a worker whose stuck claim was taken over cannot move the row', async () => {
     const row = await store.enqueue(db, { topic: 't', payload: {} });
     const [mine] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-A' });
     await backdate(row.id);
     const [theirs] = await store.claimBatch(db, { ...cfg, workerInstanceId: 'worker-B' });
     const owned = await fetch(row.id);
+    assert.equal(await store.release(db, claimOf(mine!)), false);
     assert.equal(await store.markCompleted(db, claimOf(mine!)), false);
     assert.equal(await store.retry(db, claimOf(mine!), 0, 'late'), false);
     assert.equal(await store.markFailed(db, claimOf(mine!), 'late'), false);
@@ -290,6 +307,16 @@ describe('PostgresOutboxStore', () => {
     ]);
     assert.deepEqual(pg.releases, [undefined, undefined]);
     assert.equal(pg.client.listenerCount('error'), 0);
+  });
+
+  test('on a node-postgres pool, a claim is stamped once the connection is checked out', async () => {
+    // A stamp taken before a slow checkout makes the claim look older than it
+    // is, so another worker would treat its rows as stuck that much sooner.
+    const pg = pglitePool(80);
+    await store.enqueue(db, { topic: 't', payload: {} });
+    const asked = Date.now();
+    const [claimed] = await store.claimBatch(pg.db, cfg);
+    assert.ok(Date.parse(claimed!.claimedAt!) >= asked + 70, `${claimed!.claimedAt} vs ${new Date(asked).toISOString()}`);
   });
 
   test('on a node-postgres pool, a failed statement rolls back and the client goes back for reuse', async () => {
