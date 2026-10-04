@@ -8,6 +8,13 @@ package release is useful for users.
 
 ## Unreleased
 
+- **`@nestjs-cls/transactional` 4 is supported.** The peer range is now
+  `^3.0.0 || ^4.0.0`; transactional 4 needs `nestjs-cls` 7 and, for Drizzle,
+  `@nestjs-cls/transactional-adapter-drizzle-orm` 2. Their only breaking change
+  is an `exports` map that exposes just each package root, and this package
+  imports nothing deeper. A CI leg runs the suite on that set; the
+  devDependencies stay on transactional 3.
+
 ## 0.8.0 - 2026-10-04
 
 - **Concurrent workers no longer publish the same outbox event twice** (#62).

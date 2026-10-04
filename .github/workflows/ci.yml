@@ -227,6 +227,32 @@ jobs:
       - name: Run the suite against better-sqlite3 13
         run: npm test
 
+  nestjs-cls-latest-major:
+    name: nestjs-cls 7 / transactional 4 compatibility (Node 22)
+    runs-on: ubuntu-latest
+    # The published peer range allows @nestjs-cls/transactional ^3 || ^4. The
+    # devDependencies stay on transactional 3 / nestjs-cls 6, which most apps
+    # still run; this leg layers the 4.x set (transactional 4 needs nestjs-cls
+    # 7 and the Drizzle adapter 2) over the lockfile and runs the suite, whose
+    # engine specs boot a Nest app with the transactional plugin, so the 4.x
+    # end of the range is a tested claim rather than an assumption.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install with nestjs-cls 7 and @nestjs-cls/transactional 4
+        run: |
+          npm ci
+          npm install --no-save --workspace-root nestjs-cls@^7.0.0 @nestjs-cls/transactional@^4.0.0 @nestjs-cls/transactional-adapter-drizzle-orm@^2.0.0
+          node -e "for (const p of ['nestjs-cls', '@nestjs-cls/transactional', '@nestjs-cls/transactional-adapter-drizzle-orm']) console.log(p, require(p + '/package.json').version)"
+
+      - name: Build the package and run the suite against the 4.x set
+        run: |
+          npm run build --workspace @nest-native/messaging
+          npm test
+
   nestjs-compat:
     name: NestJS ${{ matrix.nest.label }} compatibility (Node 22)
     runs-on: ubuntu-latest
