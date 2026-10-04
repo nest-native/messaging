@@ -314,6 +314,8 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
   before(async () => {
     const pg = await import('pg');
     pool = new pg.Pool({ connectionString: POSTGRES_URL });
+    // node-postgres requires an `error` listener on every pool (the store warns without one).
+    pool.on('error', () => undefined);
     for (const stmt of PG_DDL) await pool.query(stmt);
     db = await buildPgDb(pool);
   });
@@ -421,7 +423,7 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
     const strict = new pg.Pool({
       connectionString: POSTGRES_URL,
       options: '-c default_transaction_isolation=serializable',
-    });
+    }).on('error', () => undefined);
     const strictDb = await buildPgDb(strict);
     const reclaim = await pool.connect();
     try {
@@ -458,7 +460,7 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
         connectionString: POSTGRES_URL,
         options: '-c default_transaction_isolation=serializable',
         max: 2,
-      }),
+      }).on('error', () => undefined),
     );
     try {
       await seed(256);
@@ -515,7 +517,7 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
     const repeatable = new pg.Pool({
       connectionString: POSTGRES_URL,
       options: '-c default_transaction_isolation=repeatable\\ read',
-    });
+    }).on('error', () => undefined);
     const repeatableDb = await buildPgDb(repeatable);
     const operator = await pool.connect();
     try {

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Logger } from '@nestjs/common';
 import { and, eq, inArray, lte, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type {
@@ -17,6 +18,7 @@ type Db = NodePgDatabase<Record<string, never>>;
 interface PgPool {
   connect(): Promise<PgPoolClient>;
   totalCount: number;
+  listenerCount?(event: 'error'): number;
 }
 interface PgPoolClient {
   query(text: string): Promise<unknown>;
@@ -30,6 +32,24 @@ const isPgPool = (client: unknown): client is PgPool =>
   client !== null &&
   typeof (client as Partial<PgPool>).connect === 'function' &&
   typeof (client as Partial<PgPool>).totalCount === 'number';
+
+const logger = new Logger('PostgresOutboxStore');
+// Pools already warned that they have no `error` listener.
+const unguardedPools = new WeakSet<object>();
+
+/**
+ * Warns once per pool that has no `error` listener. node-postgres reports a
+ * connection an idle client loses as the pool's `error` event, and with no
+ * listener that event crashes the process: every client the store releases
+ * goes back into that state, so the listener is load-bearing.
+ */
+function warnIfUnguarded(pool: PgPool): void {
+  if (unguardedPools.has(pool) || pool.listenerCount?.('error') !== 0) return;
+  unguardedPools.add(pool);
+  logger.warn(
+    "the node-postgres Pool the outbox store runs on has no 'error' listener; node-postgres crashes the process when an idle client loses its connection, so add pool.on('error', ...)",
+  );
+}
 
 /** Where a drizzle database keeps its query logger and cache (drizzle internals, read defensively). */
 interface DrizzleSessionOwner {
@@ -57,6 +77,7 @@ async function readCommitted<T>(db: unknown, work: (tx: Db) => Promise<T>): Prom
       isolationLevel: 'read committed',
     });
   }
+  warnIfUnguarded(pool);
   // The pool is shaped like node-postgres's, so its drizzle driver (and `pg`)
   // loads here, before a client is checked out. The caller's query logger and
   // cache carry over, so the store's statements show up where the

@@ -39,10 +39,12 @@ package release is useful for users.
     reclaims rows by its own clock and its own value, so the smallest value in
     the fleet is the one in force.
 - **Upgrade every worker on a table together.** These guarantees hold once
-  every worker draining a table runs this version: a 0.7.x worker can still
-  take over a newer worker's claim, and then both publish the event. Stop the
-  0.7.x workers before starting the new ones, or expect duplicates and `lost`
-  warnings while both run. The schema is unchanged.
+  every worker draining a table runs this version. A 0.7.x worker claims
+  without `SKIP LOCKED`, so it can take over a row a newer worker has just
+  claimed, and both publish the event; and its transitions match on the row's
+  id alone, so it can complete, retry or fail a row another worker holds. Stop
+  the 0.7.x workers before starting the new ones, or expect duplicates and
+  `lost` warnings while both run. The schema is unchanged.
 - **The outbox claim no longer crashes the process when the database drops
   its connection.** The claim ran through drizzle's `transaction()`, which
   leaves the checked-out client without an `error` listener and sends BEGIN
@@ -53,7 +55,9 @@ package release is useful for users.
   errors while the client is out, rolls back without hiding the original
   error, and returns a broken client with its error so the pool discards it.
   The call rejects instead, and `runWorkerLoop` reports it through `onError`.
-  As node-postgres requires of every pool, give the pool an `error` listener.
+  As node-postgres requires of every pool, give the pool an `error` listener:
+  without one, a connection an idle client loses still crashes the process.
+  The store logs a warning once when the pool has none.
   The inbox and your own `@Transactional` bodies still go through drizzle's
   `transaction()`; a per-client listener
   (`pool.on('connect', (client) => client.on('error', handle))`) keeps a
@@ -72,9 +76,9 @@ package release is useful for users.
     row. Pass numbers, and leave a field `undefined` to keep its default:
     `batchSize: env.BATCH_SIZE ? Number(env.BATCH_SIZE) : undefined`. The error
     names a string as a string.
-  - `runWorkerLoop` rejects at once instead of failing every tick. Keep its
-    promise and handle that rejection: discarded with `void`, it ends the
-    process as an unhandled rejection, without reaching `onError`.
+  - **Breaking:** `runWorkerLoop` rejects at once instead of failing every
+    tick. Keep its promise and handle that rejection: discarded with `void`,
+    it ends the process as an unhandled rejection, without reaching `onError`.
   - `resolveClaimerConfig()` is exported, so a worker can check its config at
     startup.
 - **Breaking for custom `OutboxStore` implementations.**

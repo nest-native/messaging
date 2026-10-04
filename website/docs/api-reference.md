@@ -114,9 +114,11 @@ and reclaims claims with its own clock and its own value, so the smallest
 `stuckTimeoutMs` in the fleet is the one in force.
 
 **Upgrading from 0.7.x.** These guarantees hold once every worker draining a
-table runs this version. A 0.7.x worker can still take over a newer worker's
-claim, and then both publish the event. Stop the 0.7.x workers before starting
-the new ones, or expect duplicates and `lost` warnings while both run.
+table runs this version. A 0.7.x worker claims without `SKIP LOCKED`, so it can
+take over a row a newer worker has just claimed, and both publish the event;
+and its transitions match on the row's id alone, so it can complete, retry or
+fail a row another worker holds. Stop the 0.7.x workers before starting the new
+ones, or expect duplicates and `lost` warnings while both run.
 
 If recording a delivery fails — the database errors after a successful
 publish — `tick()` throws. The event stays claimed and is published again once
@@ -418,7 +420,9 @@ node-postgres (asynchronous) dialect. Same shape as `/sqlite`. On a
 node-postgres `Pool`, the outbox claim and each transition run on a client the
 store checks out itself, so a connection the database drops mid-transaction
 rejects the call instead of crashing the process. Give the pool an `error`
-listener, as node-postgres requires of every pool. The inbox and your own
+listener, as node-postgres requires of every pool: without one, a connection an
+idle client loses still crashes the process, and the store logs a warning once
+when the pool has none. The inbox and your own
 `@Transactional` bodies still go through drizzle's `transaction()`, which
 leaves its checked-out client without one; a per-client listener
 (`pool.on('connect', (client) => client.on('error', handle))`) covers those too.

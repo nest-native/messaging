@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { strict as assert } from 'node:assert';
 import { EventEmitter } from 'node:events';
 import { before, beforeEach, describe, test } from 'node:test';
+import { Logger } from '@nestjs/common';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
 import { drizzle as drizzleNodePg } from 'drizzle-orm/node-postgres';
@@ -353,6 +354,32 @@ describe('PostgresOutboxStore', () => {
     assert.equal(await store.markCompleted(loggedDb, claimOf(claimed!)), true);
     assert.ok(logged.some((q) => q.includes('for update skip locked')), logged.join('\n'));
     assert.ok(logged.some((q) => q.startsWith('update "outbox_events" set "status"')), logged.join('\n'));
+  });
+
+  test("on a node-postgres pool without an 'error' listener, the store warns once", async () => {
+    // node-postgres reports a connection an idle client loses as the pool's
+    // `error` event, which crashes the process when nothing listens.
+    const warns: string[] = [];
+    Logger.overrideLogger({
+      log: () => {},
+      error: () => {},
+      warn: (message: unknown) => warns.push(String(message)),
+      debug: () => {},
+      verbose: () => {},
+    });
+    try {
+      const unguarded = Object.assign(new EventEmitter(), pglitePool().pool);
+      const guarded = Object.assign(new EventEmitter(), pglitePool().pool).on('error', () => undefined);
+      for (const pool of [unguarded, unguarded, guarded]) {
+        const row = await store.enqueue(db, { topic: 't', payload: {} });
+        const [claimed] = await store.claimBatch(drizzleNodePg(pool as never), cfg);
+        assert.equal(claimed?.id, row.id);
+      }
+    } finally {
+      Logger.overrideLogger(false);
+    }
+    assert.equal(warns.length, 1, warns.join('\n'));
+    assert.match(warns[0] ?? '', /no 'error' listener/);
   });
 
   test('on a node-postgres pool, a handle without drizzle internals still works', async () => {
