@@ -82,7 +82,7 @@ still cannot load NestJS 12.
 
 Every PR runs the full gate — build, typecheck, coverage with `c8` enforced at
 100% for statements, branches, functions, and lines, cognitive complexity
-enforcement (SonarJS threshold `15`), tarball validation, sample version sync,
+enforcement (Biome, threshold `15`), tarball validation, sample version sync,
 and a supply-chain audit:
 
 ```bash
