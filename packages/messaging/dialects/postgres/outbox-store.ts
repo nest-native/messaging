@@ -188,13 +188,16 @@ export class PostgresOutboxStore implements OutboxStore {
     db: unknown,
     cfg: ResolvedClaimerConfig,
   ): Promise<OutboxEventRow[]> {
-    const now = new Date();
-    const nowIso = now.toISOString();
-    const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
     // READ COMMITTED whatever the database default: under REPEATABLE READ or
     // SERIALIZABLE, a row another worker claims while this scan is running
     // fails the whole claim (40001) instead of being skipped.
     return readCommitted(db, async (tx) => {
+      // Stamped once the connection is ours: a checkout that waited on a busy
+      // pool must not leave this claim looking older than it is, or another
+      // worker would treat its rows as stuck that much sooner.
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
       const candidates = await tx
         .select({ id: outboxEvents.id })
         .from(outboxEvents)
@@ -251,6 +254,16 @@ export class PostgresOutboxStore implements OutboxStore {
           claimedBy: null,
           lastError: lastError ?? null,
         })
+        .where(heldBy(claim))
+        .returning({ id: outboxEvents.id }),
+    );
+  }
+
+  async release(db: unknown, claim: OutboxClaim): Promise<boolean> {
+    return fenced(db, (tx) =>
+      tx
+        .update(outboxEvents)
+        .set({ status: 'pending', claimedAt: null, claimedBy: null })
         .where(heldBy(claim))
         .returning({ id: outboxEvents.id }),
     );

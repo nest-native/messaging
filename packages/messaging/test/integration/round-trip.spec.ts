@@ -251,6 +251,72 @@ describe('MySQL round-trip (real service)', { skip: !MYSQL_URL }, () => {
     assert.equal(await outbox.markCompleted(poolDb, claimOf(theirs!)), true);
   });
 
+  // The MySQL connection running `pattern`: blocked behind the holder, it is
+  // the only one with that statement in flight. (A row-lock wait reports its
+  // state as "updating", a table-lock wait as "Waiting for table ... lock".)
+  async function mysqlLockWaiter(pattern: string): Promise<number> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const [rows] = await connection.query(
+        "SELECT ID AS id FROM information_schema.PROCESSLIST WHERE DB = DATABASE() AND COMMAND = 'Query' AND INFO LIKE ?",
+        [pattern],
+      );
+      const waiting = rows as { id: number }[];
+      if (waiting.length > 0) return waiting[0]!.id;
+      await sleep(20);
+    }
+    throw new Error(`no connection waiting on a lock for ${pattern}`);
+  }
+
+  // A failover or KILL while the store's statement waits on a lock. mysql2's
+  // pooled connection listens for its own errors, so the call must reject
+  // without crashing the process, and the pool must still serve the next call.
+  async function survivesConnectionLoss(
+    block: (holder: import('mysql2/promise').PoolConnection) => Promise<unknown>,
+    run: (target: typeof poolDb) => Promise<unknown>,
+    waiting: string,
+  ): Promise<void> {
+    const mysql = await import('mysql2/promise');
+    const doomed = mysql.createPool({ uri: MYSQL_URL as string, connectionLimit: 2 });
+    const doomedDb = await buildMysqlDb(doomed);
+    const holder = await pool.getConnection();
+    try {
+      await holder.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+      await holder.query('BEGIN');
+      await block(holder);
+      const pending = run(doomedDb);
+      pending.catch(() => undefined);
+      await connection.query(`KILL ${await mysqlLockWaiter(waiting)}`);
+      await assert.rejects(pending);
+      await holder.query('UNLOCK TABLES');
+      await holder.query('ROLLBACK');
+      const [rows] = await doomed.query('SELECT 1 AS ok');
+      assert.deepEqual(rows, [{ ok: 1 }], 'the pool replaced the dead connection');
+    } finally {
+      holder.release();
+      await doomed.end();
+    }
+  }
+
+  test('a connection lost mid-claim rejects instead of crashing the process', async () => {
+    await seed(1);
+    await survivesConnectionLoss(
+      // SKIP LOCKED never waits on a row lock, so hold the whole table instead.
+      (holder) => holder.query('LOCK TABLES outbox_events WRITE'),
+      (target) => outbox.claimBatch(target, cfg),
+      'select `id` from `outbox_events`%',
+    );
+  });
+
+  test('a connection lost mid-transition rejects instead of crashing the process', async () => {
+    const [row] = await seed(1);
+    const [mine] = await outbox.claimBatch(poolDb, cfg);
+    await survivesConnectionLoss(
+      (holder) => holder.query('SELECT id FROM outbox_events WHERE id = ? FOR UPDATE', [row!.id]),
+      (target) => outbox.markCompleted(target, claimOf(mine!)),
+      'update `outbox_events`%',
+    );
+  });
+
   // As InboxService runs it: the dedup row and the side effect in one transaction.
   const deliver = (key: string, effect: () => Promise<void> = async () => {}) =>
     poolDb.transaction((tx) =>

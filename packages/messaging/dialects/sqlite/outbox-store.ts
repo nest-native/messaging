@@ -115,6 +115,15 @@ export class SqliteOutboxStore implements OutboxStore {
     return Promise.resolve(changes > 0);
   }
 
+  release(db: unknown, claim: OutboxClaim): Promise<boolean> {
+    const { changes } = (db as Db)
+      .update(outboxEvents)
+      .set({ status: 'pending', claimedAt: null, claimedBy: null })
+      .where(heldBy(claim))
+      .run();
+    return Promise.resolve(changes > 0);
+  }
+
   markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean> {
     const { changes } = (db as Db)
       .update(outboxEvents)

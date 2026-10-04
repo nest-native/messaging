@@ -61,10 +61,13 @@ export class MysqlOutboxStore implements OutboxStore {
     db: unknown,
     cfg: ResolvedClaimerConfig,
   ): Promise<OutboxEventRow[]> {
-    const now = new Date();
-    const nowIso = now.toISOString();
-    const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
     return (db as Db).transaction(async (tx) => {
+      // Stamped once the connection is ours: a checkout that waited on a busy
+      // pool must not leave this claim looking older than it is, or another
+      // worker would treat its rows as stuck that much sooner.
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
       const candidates = await tx
         .select({ id: outboxEvents.id })
         .from(outboxEvents)
@@ -120,6 +123,14 @@ export class MysqlOutboxStore implements OutboxStore {
         claimedBy: null,
         lastError: lastError ?? null,
       })
+      .where(heldBy(claim));
+    return result.affectedRows > 0;
+  }
+
+  async release(db: unknown, claim: OutboxClaim): Promise<boolean> {
+    const [result] = await (db as Db)
+      .update(outboxEvents)
+      .set({ status: 'pending', claimedAt: null, claimedBy: null })
       .where(heldBy(claim));
     return result.affectedRows > 0;
   }

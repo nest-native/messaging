@@ -32,6 +32,10 @@ const MAX_DATE_OFFSET_MS = 8.64e15;
 const stampShown = (value: unknown): string =>
   typeof value === 'string' ? JSON.stringify(value) : Object.prototype.toString.call(value).slice(8, -1);
 
+// A thrown value as a log line can show it.
+const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 // A rejected value as the caller wrote it: a string from an env-backed config
 // keeps its quotes, so `"60000" (string)` does not pass for the number 60000.
 const shown = (value: unknown): string =>
@@ -128,12 +132,17 @@ export class OutboxClaimer {
     // already have reclaimed its remaining rows; publishing them here as well
     // would only deliver them twice.
     const expired: string[] = [];
-    for (const event of claimed) {
+    for (const [index, event] of claimed.entries()) {
       if (Date.now() - heldSince >= cfg.stuckTimeoutMs) {
         expired.push(event.id);
         continue;
       }
-      report[await this.processOne(event, cfg)] += 1;
+      try {
+        report[await this.processOne(event, cfg)] += 1;
+      } catch (error) {
+        await this.releaseUnpublished(claimed.slice(index + 1));
+        throw error;
+      }
     }
     if (expired.length > 0) {
       report.lost += expired.length;
@@ -165,6 +174,35 @@ export class OutboxClaimer {
     // failed. The tick throws instead, and the event, still claimed, is
     // published again once its claim goes stale.
     return this.settle(event, await this.store.markCompleted(this.db, claim), 'completed');
+  }
+
+  /**
+   * After recording an outcome failed, hands the batch's unpublished rows back
+   * through the store's optional `release`, so they are available again at
+   * once rather than after `stuckTimeoutMs`. Best effort: the database just
+   * failed, so the first error ends it, and the original error is the one the
+   * tick throws.
+   */
+  private async releaseUnpublished(events: OutboxEventRow[]): Promise<void> {
+    const release = this.store.release?.bind(this.store);
+    if (release === undefined || events.length === 0) return;
+    let released = 0;
+    try {
+      for (const { id, claimedBy, claimedAt } of events) {
+        if (typeof claimedBy !== 'string' || typeof claimedAt !== 'string') continue;
+        if (await release(this.db, { id, claimedBy, claimedAt })) released += 1;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `could not hand back ${events.length - released} unpublished outbox event(s) after a failed transition (${messageOf(error)}); they are reclaimed after stuckTimeoutMs`,
+      );
+      return;
+    }
+    if (released > 0) {
+      this.logger.warn(
+        `handed back ${released} unpublished outbox event(s) after a failed transition, for the next claim to take`,
+      );
+    }
   }
 
   /**
@@ -210,7 +248,7 @@ export class OutboxClaimer {
     cfg: ResolvedClaimerConfig,
     error: unknown,
   ): Promise<ProcessOutcome> {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = messageOf(error);
     // Permanent: retrying can never succeed — fail now instead of burning attempts.
     if (error instanceof PermanentError) {
       return this.fail(event, claim, message);

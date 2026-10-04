@@ -51,6 +51,8 @@ interface OutboxMockOptions {
   candidates?: { id: string }[];
   /** What the transitions' UPDATE reports, as mysql2's ResultSetHeader would. */
   affectedRows?: number;
+  /** How long the transaction waits for a pooled connection before it runs. */
+  checkoutDelayMs?: number;
 }
 
 interface CapturedQueries {
@@ -106,8 +108,9 @@ function outboxMock(options: OutboxMockOptions = {}) {
         };
       },
     }),
-    transaction: (run: (tx: unknown) => unknown, config?: unknown) => {
+    transaction: async (run: (tx: unknown) => unknown, config?: unknown) => {
       captured.transactionConfig = config;
+      await new Promise((resolve) => setTimeout(resolve, options.checkoutDelayMs ?? 0));
       return run(db);
     },
   };
@@ -190,6 +193,19 @@ describe('MysqlOutboxStore', () => {
     assert.deepEqual(captured.transactionConfig, { isolationLevel: 'read committed' });
   });
 
+  test('claimBatch stamps the claim once the connection is checked out', async () => {
+    // A stamp taken before a slow checkout makes the claim look older than it
+    // is, so another worker would treat its rows as stuck that much sooner.
+    const { db, captured } = outboxMock({
+      candidates: [{ id: 'a' }],
+      selectRows: [row({ id: 'a' })],
+      checkoutDelayMs: 80,
+    });
+    const asked = Date.now();
+    await store.claimBatch(db, cfg);
+    assert.ok(Date.parse(captured.set?.claimedAt as string) >= asked + 70);
+  });
+
   test('claimBatch returns [] with no update when nothing is due', async () => {
     const { db, captured } = outboxMock({ candidates: [] });
 
@@ -252,8 +268,16 @@ describe('MysqlOutboxStore', () => {
     assertFenced(captured.updateWhere);
   });
 
+  test('release hands the row back pending and unclaimed, attempts untouched', async () => {
+    const { db, captured } = outboxMock();
+    assert.equal(await store.release(db, claim), true);
+    assert.deepEqual(captured.set, { status: 'pending', claimedAt: null, claimedBy: null });
+    assertFenced(captured.updateWhere);
+  });
+
   test('each transition resolves false when its claim no longer holds the row', async () => {
     const lost = () => outboxMock({ affectedRows: 0 }).db;
+    assert.equal(await store.release(lost(), claim), false);
     assert.equal(await store.markCompleted(lost(), claim), false);
     assert.equal(await store.retry(lost(), claim, 0, 'late'), false);
     assert.equal(await store.markFailed(lost(), claim, 'late'), false);

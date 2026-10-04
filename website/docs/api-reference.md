@@ -288,6 +288,7 @@ interface OutboxStore {
   markCompleted(db: unknown, claim: OutboxClaim): Promise<boolean>;
   retry(db: unknown, claim: OutboxClaim, delayMs: number, lastError?: string): Promise<boolean>;
   markFailed(db: unknown, claim: OutboxClaim, reason: string): Promise<boolean>;
+  release?(db: unknown, claim: OutboxClaim): Promise<boolean>; // optional (0.8.2+)
 }
 
 interface OutboxClaim {
@@ -319,6 +320,17 @@ An outbox store must uphold what the claimer relies on:
   `processing` with exactly the claim's `claimedBy` and `claimedAt`. It resolves
   `true` when it wrote the row and `false` when the claim no longer held it; a
   database error rejects.
+- **`release` is optional.** It hands a held row back `pending` and unclaimed,
+  with its attempts and due time unchanged, under the same fence. When
+  recording an outcome fails (the database went away mid-batch), the claimer
+  calls it for the batch's unpublished rows, best effort, so the next claim
+  takes them at once; without it they wait for `stuckTimeoutMs`. The row whose
+  outcome failed to record is never handed back: it was published, and handing
+  it back would publish it again at once.
+- **Stamp the claim with the time it ran.** Take `claimedAt` once the claim has
+  its connection, not before a pooled checkout: a stamp taken before a slow
+  checkout makes the claim look older than it is, and other workers reclaim its
+  rows that much sooner.
 
 Also exported: `OutboxEventRow`, `ResolvedClaimerConfig` / `ClaimerConfig`,
 `OutboxStatus` / `OUTBOX_STATUSES`, `InboxStatus` / `INBOX_STATUSES`, and the DI
@@ -440,7 +452,9 @@ mysql2 (asynchronous) dialect. Same shape as `/postgres`. Needs MySQL 8.0.1 or
 later, for the claim's `FOR UPDATE SKIP LOCKED`. The claim runs at READ
 COMMITTED, and with binary logging on InnoDB refuses writes from it under
 `binlog_format=STATEMENT`, so `binlog_format` must be ROW (the MySQL 8 default)
-or MIXED.
+or MIXED. A connection the database drops mid-claim or mid-transition rejects
+the call: mysql2's pooled connections listen for their own errors, so unlike
+node-postgres nothing extra is needed, and the pool replaces the connection.
 
 | Export | Kind | Notes |
 | --- | --- | --- |
