@@ -251,6 +251,41 @@ describe('MySQL round-trip (real service)', { skip: !MYSQL_URL }, () => {
     assert.equal(await outbox.markCompleted(poolDb, claimOf(theirs!)), true);
   });
 
+  test('the claim runs at READ COMMITTED: an enqueue while it holds its rows does not wait', async () => {
+    // Under InnoDB's default REPEATABLE READ the claim's locking read also locks
+    // the gaps it scanned, so every concurrent enqueue would wait for the claim
+    // to commit. Pause the claim between its read and its UPDATE, and enqueue
+    // from another connection meanwhile.
+    await seed(3);
+    const mysql = await import('mysql2/promise');
+    const watched = mysql.createPool({ uri: MYSQL_URL as string, connectionLimit: 1 });
+    let enqueue: Promise<unknown> | undefined;
+    let outcome: unknown;
+    const getConnection = watched.getConnection.bind(watched);
+    watched.getConnection = (async () => {
+      const connection = await getConnection();
+      const query = connection.query.bind(connection) as (...args: unknown[]) => Promise<unknown>;
+      (connection as { query: unknown }).query = async (options: unknown, ...rest: unknown[]) => {
+        const text = typeof options === 'string' ? options : (options as { sql: string }).sql;
+        if (enqueue === undefined && /^update `outbox_events` set `status` = \?, `claimed_at`/.test(text)) {
+          enqueue = outbox.enqueue(poolDb, { topic: 'concurrent', payload: {} });
+          outcome = await settleWithin(enqueue, 2_000);
+        }
+        return query(options, ...rest);
+      };
+      return connection;
+    }) as typeof watched.getConnection;
+    try {
+      const claimed = await outbox.claimBatch(await buildMysqlDb(watched), cfg);
+      assert.equal(claimed.length, 3);
+      assert.notEqual(outcome, undefined, 'the claim never reached its UPDATE');
+      assert.notEqual(outcome, 'blocked', 'an enqueue waited on the claim: it ran above READ COMMITTED');
+    } finally {
+      await enqueue;
+      await watched.end();
+    }
+  });
+
   // The MySQL connection running `pattern`: blocked behind the holder, it is
   // the only one with that statement in flight. (A row-lock wait reports its
   // state as "updating", a table-lock wait as "Waiting for table ... lock".)
@@ -558,6 +593,74 @@ describe('Postgres round-trip (real service)', { skip: !POSTGRES_URL }, () => {
       assert.equal((rows as { c: number }[])[0].c, 256);
     } finally {
       await Promise.all(workers.map((worker) => worker.end()));
+    }
+  });
+
+  // Asks the server, on the same connection and inside the same transaction,
+  // which isolation level each of the store's statements runs under.
+  function reportIsolation(client: { query: unknown }, seen: string[]): void {
+    const query = (client.query as (...args: unknown[]) => Promise<{ rows: Record<string, string>[] }>).bind(client);
+    let inTransaction = false;
+    client.query = async (config: unknown, ...rest: unknown[]) => {
+      const text = typeof config === 'string' ? config : (config as { text: string }).text;
+      if (/^begin\b/i.test(text)) inTransaction = true;
+      else if (/^(commit|rollback)\b/i.test(text)) inTransaction = false;
+      else if (inTransaction) {
+        const { rows } = await query('SHOW transaction_isolation');
+        seen.push(rows[0]!.transaction_isolation!);
+      }
+      return query(config, ...rest);
+    };
+  }
+
+  test('on a pool, the claim and its transitions run at READ COMMITTED on a SERIALIZABLE server', async () => {
+    const pg = await import('pg');
+    const strict = new pg.Pool({
+      connectionString: POSTGRES_URL,
+      options: '-c default_transaction_isolation=serializable',
+    }).on('error', () => undefined);
+    const seen: string[] = [];
+    const reporting = new WeakSet<object>();
+    const connect = strict.connect.bind(strict) as () => Promise<import('pg').PoolClient>;
+    (strict as { connect: unknown }).connect = async () => {
+      const client = await connect();
+      if (!reporting.has(client)) {
+        reporting.add(client);
+        reportIsolation(client, seen);
+      }
+      return client;
+    };
+    try {
+      await seed(1);
+      const strictDb = await buildPgDb(strict);
+      const [mine] = await outbox.claimBatch(strictDb, cfg);
+      assert.equal(await outbox.markCompleted(strictDb, claimOf(mine!)), true);
+      assert.ok(seen.length >= 3, `only ${seen.length} statements observed`);
+      assert.deepEqual([...new Set(seen)], ['read committed']);
+    } finally {
+      await strict.end();
+    }
+  });
+
+  test('on a single Client, the claim and its transitions run at READ COMMITTED on a SERIALIZABLE server', async () => {
+    const pg = await import('pg');
+    const client = new pg.Client({
+      connectionString: POSTGRES_URL,
+      options: '-c default_transaction_isolation=serializable',
+    });
+    client.on('error', () => undefined);
+    await client.connect();
+    const seen: string[] = [];
+    reportIsolation(client, seen);
+    try {
+      await seed(1);
+      const clientDb = await buildPgDb(client);
+      const [mine] = await outbox.claimBatch(clientDb, cfg);
+      assert.equal(await outbox.markCompleted(clientDb, claimOf(mine!)), true);
+      assert.ok(seen.length >= 3, `only ${seen.length} statements observed`);
+      assert.deepEqual([...new Set(seen)], ['read committed']);
+    } finally {
+      await client.end();
     }
   });
 
