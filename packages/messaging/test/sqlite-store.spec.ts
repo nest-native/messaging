@@ -1,5 +1,10 @@
 import 'reflect-metadata';
 import { strict as assert } from 'node:assert';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, test } from 'node:test';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
@@ -342,5 +347,53 @@ describe('isSqliteUniqueViolation', () => {
     assert.equal(isSqliteUniqueViolation(new Error('x')), false);
     assert.equal(isSqliteUniqueViolation(null), false);
     assert.equal(isSqliteUniqueViolation('nope'), false);
+  });
+});
+
+
+describe('SqliteOutboxStore claim against another process', () => {
+  const store = new SqliteOutboxStore();
+
+  // Holds the database's write lock from a separate process for `ms`, then
+  // commits. Resolves once the lock is held, with the child's exit to await.
+  async function holdWriteLock(file: string, ms: number) {
+    const script = `
+      const Database = require(process.argv[1]);
+      const db = new Database(process.argv[2]);
+      db.exec('BEGIN IMMEDIATE');
+      process.stdout.write('locked\\n');
+      setTimeout(() => { db.exec('COMMIT'); db.close(); }, Number(process.argv[3]));
+    `;
+    const child = spawn(
+      process.execPath,
+      ['-e', script, require.resolve('better-sqlite3'), file, String(ms)],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    await once(child.stdout, 'data');
+    return { exited: once(child, 'exit') };
+  }
+
+  test('a claim waits for another process holding the write lock instead of failing', async () => {
+    // A deferred claim reads, then asks for the write lock at its UPDATE; with
+    // another process holding it, SQLite fails that upgrade at once with
+    // "database is locked" instead of waiting, because waiting could deadlock.
+    const file = join(tmpdir(), `messaging-claim-${process.pid}-${Date.now()}.db`);
+    try {
+      const setup = new Database(file);
+      setup.exec(DDL);
+      setup.close();
+      const fileDb = drizzle(new Database(file, { timeout: 5_000 }));
+      const row = store.enqueue(fileDb, { topic: 't', payload: {} });
+      const { exited } = await holdWriteLock(file, 300);
+      const asked = Date.now();
+      const [claimed] = await store.claimBatch(fileDb, cfg);
+      assert.equal(claimed?.id, row.id);
+      // Stamped once the lock was ours, not before the wait.
+      assert.ok(Date.parse(claimed!.claimedAt!) >= asked + 250, claimed!.claimedAt!);
+      await exited;
+      fileDb.$client.close();
+    } finally {
+      rmSync(file, { force: true });
+    }
   });
 });

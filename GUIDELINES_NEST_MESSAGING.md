@@ -35,6 +35,17 @@ business transaction. It is **not** a generic multi-broker messaging abstraction
     crashed the process or leaked a pool slot. A real-Postgres spec terminates
     the backend mid-claim and mid-transition.
   - A worker that lost its claim must never be able to write the row.
+  - An isolation pin is proven against the server, never by recording the
+    config a store hands drizzle: the real-Postgres specs read
+    `SHOW transaction_isolation` on the store's own connection inside its
+    transaction (pool and single `Client`, server default SERIALIZABLE), and the
+    real-MySQL spec shows an enqueue does not wait on a paused claim, which
+    REPEATABLE READ's gap locks would make it do.
+  - The SQLite claim opens with `BEGIN IMMEDIATE`. A deferred transaction reads
+    first and asks for the write lock at its UPDATE, and SQLite fails that
+    upgrade at once ("database is locked") when another process holds the
+    lock, without consulting the busy timeout. Every claim stamps `claimedAt`
+    once it holds its connection or lock, never before waiting for it.
 - **Transport seam.** The claimer publishes through `OutboxTransport`; the
   in-process default and the `@nest-native/messaging/kafka` and
   `@nest-native/messaging/rabbitmq` adapters implement it. The core never imports

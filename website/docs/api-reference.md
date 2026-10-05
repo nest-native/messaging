@@ -416,7 +416,12 @@ idempotent — or wrap their side effect in the inbox. The
 
 ## `@nest-native/messaging/sqlite`
 
-better-sqlite3 (synchronous) dialect.
+better-sqlite3 (synchronous) dialect. The claim opens its transaction with
+`BEGIN IMMEDIATE`, so when several processes share one database file it waits
+for another writer like any write would, up to better-sqlite3's busy
+`timeout`, instead of failing with "database is locked". Give the connection a
+`timeout` (`new Database(file, { timeout: 5_000 })`) when more than one process
+writes to it.
 
 | Export | Kind | Notes |
 | --- | --- | --- |

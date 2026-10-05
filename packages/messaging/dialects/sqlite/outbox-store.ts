@@ -56,10 +56,17 @@ export class SqliteOutboxStore implements OutboxStore {
     db: unknown,
     cfg: ResolvedClaimerConfig,
   ): Promise<OutboxEventRow[]> {
-    const now = new Date();
-    const nowIso = now.toISOString();
-    const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
+    // BEGIN IMMEDIATE takes the write lock up front. A deferred transaction
+    // reads first and asks for it at the UPDATE, and when another process
+    // already holds it SQLite fails that upgrade with "database is locked"
+    // rather than wait, since waiting could deadlock; an immediate one waits
+    // out the busy timeout like any writer.
     const rows = (db as Db).transaction((tx) => {
+      // Stamped once the lock is ours, as on the other dialects: a BEGIN that
+      // waited must not leave this claim looking older than it is.
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const stuckCutoff = new Date(now.getTime() - cfg.stuckTimeoutMs).toISOString();
       const candidates = tx
         .select({ id: outboxEvents.id })
         .from(outboxEvents)
@@ -85,7 +92,7 @@ export class SqliteOutboxStore implements OutboxStore {
         .where(inArray(outboxEvents.id, ids))
         .run();
       return tx.select().from(outboxEvents).where(inArray(outboxEvents.id, ids)).all();
-    });
+    }, { behavior: 'immediate' });
     return Promise.resolve(rows);
   }
 
