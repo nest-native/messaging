@@ -8,6 +8,8 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.8.3 - 2026-10-04
+
 - **The SQLite claim no longer fails with "database is locked" when another
   process writes to the same file.** It ran in a deferred transaction: it read
   first and asked for the write lock at its UPDATE, and when another process
