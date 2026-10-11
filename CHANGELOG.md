@@ -8,6 +8,14 @@ package release is useful for users.
 
 ## Unreleased
 
+- **Dependency advisories, published package unchanged.** The dev tree takes
+  `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h, critical, through Express). In
+  `website/`: `shell-quote` 1.12, `compression` 1.8.2, `source-map-js` 1.2.2 and
+  `proxy-addr` 2.0.8 within their ranges, and overrides for `tinypool` `^2.1.2`
+  and `postcss-selector-parser` `^7.1.6`, past the major their parents ask for
+  (see the guidelines' security section for how the build proves them). `braces`
+  is still the one advisory with no fix.
+
 ## 0.8.3 - 2026-10-04
 
 - **The SQLite claim no longer fails with "database is locked" when another
