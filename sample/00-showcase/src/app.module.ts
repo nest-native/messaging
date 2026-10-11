@@ -16,7 +16,7 @@ import { OrderPlacedHandler } from './order-placed.handler';
 import { OrderService } from './order.service';
 
 // A global module exporting the Drizzle instance, so both the CLS adapter and
-// MessagingModule resolve it (mirrors how @nest-native/drizzle registers).
+// MessagingModule resolve it (mirrors how @nestjs/drizzle registers).
 @Module({})
 class DbModule {}
 

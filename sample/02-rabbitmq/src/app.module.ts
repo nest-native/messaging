@@ -20,7 +20,7 @@ import { OrderService } from './order.service';
 import { RABBITMQ, RabbitmqModule } from './rabbitmq';
 import { TOPOLOGY } from './topology';
 
-// A global module exporting the Drizzle instance (mirrors how @nest-native/drizzle
+// A global module exporting the Drizzle instance (mirrors how @nestjs/drizzle
 // registers), so the CLS adapter, MessagingModule and the services resolve it.
 @Module({})
 class DbModule {}

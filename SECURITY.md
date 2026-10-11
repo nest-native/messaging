@@ -1,6 +1,6 @@
 # Security Policy
 
-Thank you for helping keep `@nest-native/drizzle` safe for NestJS and Drizzle
+Thank you for helping keep `@nest-native/messaging` safe for NestJS and Drizzle
 applications.
 
 ## Supported Versions
@@ -9,7 +9,7 @@ Security fixes target the current published package line.
 
 | Package | Supported |
 | --- | --- |
-| `@nest-native/drizzle` latest minor | Yes |
+| `@nest-native/messaging` latest minor | Yes |
 | Older unpublished branches | No |
 
 ## Reporting A Vulnerability
@@ -19,7 +19,7 @@ leakage.
 
 Use GitHub's private vulnerability reporting for this repository when available:
 
-<https://github.com/nest-native/drizzle/security/advisories/new>
+<https://github.com/nest-native/messaging/security/advisories/new>
 
 If private reporting is unavailable, contact the maintainer through the GitHub
 profile and include only the minimum information needed to establish a private
@@ -43,13 +43,15 @@ or customer data.
 
 ## Project Security Boundaries
 
-This package is a Nest integration layer around Drizzle. Applications still own:
+This package is a transactional outbox and idempotent inbox persisted through
+Drizzle, with in-process, Kafka and RabbitMQ transports. Applications still own:
 
-- Database credentials and driver configuration.
+- Database and broker credentials, and driver configuration.
 - Pool sizing, TLS, network access, and deployment policy.
-- Drizzle schema definitions and migrations.
-- Authorization and tenant selection.
-- Validation choices such as class-validator or app-owned Drizzle-Zod schemas.
+- Drizzle schema definitions and migrations (including the outbox and inbox
+  tables).
+- Authorization and tenant selection inside handlers.
+- Validation of event payloads before acting on them.
 
 Security fixes in this repository focus on package behavior, samples, docs,
 release automation, and patterns that could encourage unsafe usage.
