@@ -15,7 +15,7 @@ import { OrderAuditService } from './order-audit.service';
 import { OrderConsumer } from './order.consumer';
 import { OrderService } from './order.service';
 
-// A global module exporting the Drizzle instance (mirrors how @nest-native/drizzle
+// A global module exporting the Drizzle instance (mirrors how @nestjs/drizzle
 // registers), so the CLS adapter, MessagingModule, and OrderAuditService resolve it.
 @Module({})
 class DbModule {}
