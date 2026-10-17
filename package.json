@@ -60,7 +60,7 @@
     "@nestjs/testing": "^11.2.7",
     "@stryker-mutator/core": "^10.0.0",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "@types/pg": "^8.11.10",
     "amqplib": "^2.2.0",
     "better-sqlite3": "^12.11.1",
