@@ -1,4 +1,9 @@
 # GUIDELINES_NEST_MESSAGING.md
+
+> **Archived (2026-10-18).** `@nest-native/messaging` is deprecated in favor of
+> the official `@nestjs/outbox`; 0.8.4 was the last release. These guidelines
+> are kept as a record of how the package was built.
+
 ## Core Philosophy — this library MUST feel native in NestJS + Drizzle projects
 
 `@nest-native/messaging` implements the **transactional-outbox** and

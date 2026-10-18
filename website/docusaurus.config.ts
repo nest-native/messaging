@@ -43,6 +43,12 @@ const config: Config = {
   ],
 
   themeConfig: {
+    announcementBar: {
+      id: 'deprecated-use-nestjs-outbox',
+      content:
+        '@nest-native/messaging is deprecated: NestJS now ships an official transactional outbox. <a href="/messaging/docs/migrate-to-nestjs-outbox">Migrate to @nestjs/outbox</a>.',
+      isCloseable: false,
+    },
     image: 'img/logo.svg',
     colorMode: {
       respectPrefersColorScheme: true,

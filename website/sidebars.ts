@@ -6,6 +6,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Getting Started',
       items: [
+        'migrate-to-nestjs-outbox',
         'introduction',
         'quick-start',
       ],

@@ -1,5 +1,11 @@
 # @nest-native/messaging
 
+> **Deprecated.** Use NestJS's official transactional outbox,
+> [`@nestjs/outbox`](https://docs.nestjs.com/reliability/outbox), instead.
+> 0.8.4 is the last release of this package. The
+> [migration guide](https://nest-native.dev/messaging/docs/migrate-to-nestjs-outbox) maps every API to
+> its replacement.
+
 <p align="center">Transactional outbox + idempotent inbox for NestJS — persisted with Drizzle ORM (SQLite, Postgres &amp; MySQL), delivered in-process, over Kafka, or over RabbitMQ.</p>
 
 <p align="center">
@@ -8,9 +14,6 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="Package License" /></a>
   <img src="https://img.shields.io/badge/coverage-100%25-brightgreen.svg" alt="Test Coverage" />
 </p>
-
-> [!NOTE]
-> **v0.x — early but stable.** The producer, claimer, inbox, transport seam, and the Drizzle stores are implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are supported, with in-process (no broker), Kafka, and RabbitMQ transports.
 
 ## The problem it solves
 
@@ -147,6 +150,5 @@ whole story anyway — its processes share one machine by definition).
 - **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL 8.0.1+ (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and RabbitMQ (`amqplib`) — see [RabbitMQ](https://nest-native.dev/messaging/docs/rabbitmq).
 - **Latency:** the worker drains a backlog immediately and only idles at `pollIntervalMs`; the wake tiers cut that idle wait — `OutboxWaker` in-process, the `WakeSocket` pair across processes on one machine, and Postgres `LISTEN`/`NOTIFY` across machines (see above).
-- **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
 Part of the [nest-native](https://github.com/nest-native) family. Not affiliated with the NestJS core team. MIT licensed.

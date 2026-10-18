@@ -8,12 +8,14 @@ title: Introduction
 Transactional **outbox** + idempotent **inbox** for NestJS — persisted with
 Drizzle ORM (SQLite, Postgres, and MySQL), delivered in-process, over Kafka, or over RabbitMQ.
 
-:::note v0.x — early but stable
-The producer, claimer, inbox, transport seam, and the Drizzle stores are
-implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are
-supported, with in-process (no broker), Kafka, and RabbitMQ transports. This is a community
-project in the `nest-native` family and is **not** affiliated with the NestJS
-core team.
+:::caution Deprecated
+NestJS now ships an official transactional outbox,
+[`@nestjs/outbox`](https://docs.nestjs.com/reliability/outbox), which covers
+what this package was for. 0.8.4 is the last release, and the repository is
+archived: existing installs keep working, but nothing will be fixed. See
+[Migrate to `@nestjs/outbox`](./migrate-to-nestjs-outbox.md). This is a
+community project in the `nest-native` family and is **not** affiliated with
+the NestJS core team.
 :::
 
 ## The dual-write problem
@@ -85,7 +87,6 @@ or the [API Reference](./api-reference.md) for the full surface.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no
   broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and
   RabbitMQ (`amqplib`), plus an in-memory one for tests.
-- **Roadmap:** additional transports.
 - **Out of scope:** CDC (Debezium) log-tailing is an intentional non-goal — this
   is the application-level outbox, written through your ORM transaction. Generic
   multi-broker routing is also out of scope.
