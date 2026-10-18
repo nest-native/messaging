@@ -8,6 +8,20 @@ package release is useful for users.
 
 ## Unreleased
 
+## 0.8.4 - 2026-10-18
+
+- **Deprecated in favor of the official `@nestjs/outbox`.** NestJS now ships
+  its own transactional outbox, and it covers what this package was for. This
+  is the last release: the repository is archived and the package is
+  deprecated on npm. Existing installs keep working. The
+  [migration guide](https://nest-native.dev/messaging/docs/migrate-to-nestjs-outbox)
+  maps every API to its replacement: producers pass their transaction to
+  `Outbox.add()`, the worker loop becomes the module's relay, and PostgreSQL
+  and MySQL get the module's own stores. The SQLite store, the cross-process
+  wakes and the Kafka and RabbitMQ transports and consumers become
+  application code; the guide shows each one, taken from the reference app's
+  port. No code change in this release.
+
 - **Dependency advisories, published package unchanged.** The dev tree takes
   `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h, critical, through Express). In
   `website/`: `shell-quote` 1.12, `compression` 1.8.2, `source-map-js` 1.2.2 and

@@ -10,8 +10,14 @@
   <a href="https://nest-native.dev/messaging/"><img src="https://img.shields.io/badge/docs-%40nest--native%2Fmessaging-0f766e.svg" alt="Documentation" /></a>
 </p>
 
-> [!NOTE]
-> **v0.x — early but stable.** The public API (the producer, claimer, inbox, transport seam, and the Drizzle stores) is implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are supported, with in-process (no broker), Kafka, and RabbitMQ transports.
+> [!CAUTION]
+> **Deprecated.** NestJS now ships an official transactional outbox, [`@nestjs/outbox`](https://docs.nestjs.com/reliability/outbox), which covers what this package was for. `@nest-native/messaging` 0.8.4 is the last release and this repository is archived: existing installs keep working, but nothing will be fixed.
+>
+> ```bash
+> npm uninstall @nest-native/messaging
+> npm install @nestjs/outbox
+> ```
+> Producers pass their transaction to `Outbox.add()`, the worker loop becomes the module's relay, and PostgreSQL and MySQL get the module's own stores. The SQLite store, the cross-process wakes and the Kafka and RabbitMQ transports move into your application. See the [migration guide](https://nest-native.dev/messaging/docs/migrate-to-nestjs-outbox).
 
 ## The problem it solves
 

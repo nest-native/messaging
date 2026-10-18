@@ -1,5 +1,11 @@
 # @nest-native/messaging
 
+> **Deprecated.** Use NestJS's official transactional outbox,
+> [`@nestjs/outbox`](https://docs.nestjs.com/reliability/outbox), instead.
+> 0.8.4 is the last release of this package. The
+> [migration guide](https://nest-native.dev/messaging/docs/migrate-to-nestjs-outbox) maps every API to
+> its replacement.
+
 <p align="center">Transactional outbox + idempotent inbox for NestJS — persisted with Drizzle ORM (SQLite, Postgres &amp; MySQL), delivered in-process, over Kafka, or over RabbitMQ.</p>
 
 <p align="center">
@@ -8,9 +14,6 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="Package License" /></a>
   <img src="https://img.shields.io/badge/coverage-100%25-brightgreen.svg" alt="Test Coverage" />
 </p>
-
-> [!NOTE]
-> **v0.x — early but stable.** The producer, claimer, inbox, transport seam, and the Drizzle stores are implemented and tested at 100% coverage. SQLite, Postgres, and MySQL are supported, with in-process (no broker), Kafka, and RabbitMQ transports.
 
 ## The problem it solves
 
