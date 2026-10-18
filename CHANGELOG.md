@@ -19,8 +19,11 @@ package release is useful for users.
   `Outbox.add()`, the worker loop becomes the module's relay, and PostgreSQL
   and MySQL get the module's own stores. The SQLite store, the cross-process
   wakes and the Kafka and RabbitMQ transports and consumers become
-  application code; the guide shows each one, taken from the reference app's
-  port. No code change in this release.
+  application code, and the guide shows where to take each from: the store,
+  transports and consumers from the reference app's port, the wakes from this
+  package's own files. No code change in this release; the repository gains
+  the MIT `LICENSE` file its `package.json` always declared, for the files the
+  guide has you copy.
 
 - **Dependency advisories, published package unchanged.** The dev tree takes
   `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h, critical, through Express). In

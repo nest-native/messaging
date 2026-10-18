@@ -5,12 +5,14 @@ applications.
 
 ## Supported Versions
 
-Security fixes target the current published package line.
+`@nest-native/messaging` is deprecated in favor of the official
+[`@nestjs/outbox`](https://docs.nestjs.com/reliability/outbox), and this
+repository is archived: 0.8.4 is the last release, and no version receives
+security fixes.
 
 | Package | Supported |
 | --- | --- |
-| `@nest-native/messaging` latest minor | Yes |
-| Older unpublished branches | No |
+| `@nest-native/messaging`, every version (0.8.4 included) | No: deprecated and archived |
 
 ## Reporting A Vulnerability
 

@@ -14,8 +14,9 @@
 > **Deprecated.** NestJS now ships an official transactional outbox, [`@nestjs/outbox`](https://docs.nestjs.com/reliability/outbox), which covers what this package was for. `@nest-native/messaging` 0.8.4 is the last release and this repository is archived: existing installs keep working, but nothing will be fixed.
 >
 > ```bash
-> npm uninstall @nest-native/messaging
 > npm install @nestjs/outbox
+> # once the old outbox_events and inbox_events tables are drained and dropped:
+> npm uninstall @nest-native/messaging
 > ```
 > Producers pass their transaction to `Outbox.add()`, the worker loop becomes the module's relay, and PostgreSQL and MySQL get the module's own stores. The SQLite store, the cross-process wakes and the Kafka and RabbitMQ transports move into your application. See the [migration guide](https://nest-native.dev/messaging/docs/migrate-to-nestjs-outbox).
 
@@ -57,7 +58,6 @@ npm install amqplib                                                # only for th
 
 - **Drivers:** SQLite (better-sqlite3, sync), Postgres (`pg`, async), and MySQL 8.0.1+ (`mysql2`, async) via per-dialect stores.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and RabbitMQ (`amqplib`) — see [RabbitMQ](website/docs/rabbitmq.md).
-- **Roadmap:** additional transports. CDC (Debezium) is an intentional non-goal — this is the app-level outbox.
 
 ## Compatibility
 

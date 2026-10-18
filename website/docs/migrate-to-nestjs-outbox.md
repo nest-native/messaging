@@ -44,15 +44,18 @@ are application code you can copy (MIT).
   Node 22.
 - **TypeScript.** Its typings come through its `exports` map. TypeScript 6's
   default resolution for `module: commonjs` (`bundler`) finds them, and so do
-  `node16` and `nodenext`; `node10` finds the root entry point but not
-  `@nestjs/outbox/postgres`, `/mysql` or `/testing`.
+  `module: nodenext` from TypeScript 5.8 and `node20` from 5.9. `node16` and
+  `node18` find them but refuse to `require()` an ES module (TS1479), and
+  `node10` finds the root entry point but not `@nestjs/outbox/postgres`,
+  `/mysql` or `/testing`.
 - **NestJS.** It supports NestJS 11 and 12, like this package.
 - **Dependencies.** This package had none; `@nestjs/outbox` has one,
   `@nestjs/store-kit`, whose peers (`drizzle-orm`, `kysely`, `mysql2`, `pg`) are
   all optional.
-- **Databases.** PostgreSQL, with READ COMMITTED as the server's default
-  isolation level, and MySQL 8.4 LTS or 9.x with a strict `sql_mode`. SQLite
-  needs a store of your own ([SQLite](#sqlite)).
+- **Databases.** PostgreSQL, with READ COMMITTED as the default isolation
+  level of the store's connections (`default_transaction_isolation`, which the
+  server, the database or the role can set), and MySQL 8.4 LTS or 9.x with a
+  strict `sql_mode`. SQLite needs a store of your own ([SQLite](#sqlite)).
 - **Transactions.** The module needs no transaction library: you pass it your
   ORM's transaction. `@nestjs-cls/transactional` keeps working, and the
   examples below use it.
@@ -96,7 +99,7 @@ npm uninstall @nest-native/messaging
 | `/rabbitmq`: `RabbitOutboxTransport`, `RabbitInboxConsumer`, `X_DEAD_LETTER_ID` | none over amqplib ([RabbitMQ](#rabbitmq)) |
 | `X_EVENT_ID`, `X_IDEMPOTENCY_KEY`, `X_ERROR`, `headerToString()`, `encodeWireValue()`, `decodeWireValue()` | none: headers are free-form strings; copy the wire contract ([Kafka](#kafka)) |
 | `deriveDedupKey()`, `ConsumerAction`, `actionForOutcome()`, `actionForError()` | none; the reference app keeps `deriveDedupKey()` in its wire contract |
-| `/testing`: `InMemoryOutboxTransport` | `relay.runOnce()` and a transport of your own; `InMemoryOutboxStore`; contract suites in `@nestjs/outbox/testing` ([Testing](#testing)) |
+| `/testing`: `InMemoryOutboxTransport` | `relay.runOnce()` and a transport of your own; `InMemoryOutboxStore`, from the root entry point; contract suites in `@nestjs/outbox/testing` ([Testing](#testing)) |
 | `onTick`, `onError` | `OutboxEvents.events$`, the `nestjs:outbox:*` diagnostics channels, `relay.stats()` ([Observability](#observability)) |
 
 ## Register the module
@@ -171,7 +174,9 @@ export class AppModule {}
   `OutboxInbox`, `OutboxDeadLetters`, `OutboxEvents` and `OutboxStorage` can be
   injected anywhere, and the options token is `OUTBOX_MODULE_OPTIONS`. Where
   you injected `OUTBOX_STORE` or `INBOX_STORE`, inject `OutboxStorage` and read
-  its `messages` or `inbox`.
+  its `messages` or `inbox` in a method or a lifecycle hook, never in a
+  constructor: the first read locks the registry, and a store whose
+  constructor runs after it fails to register, which fails the startup.
 
 ### With a broker transport
 
@@ -206,12 +211,13 @@ result, or a name set in both places, fails the startup.
 
 A transport implements `publish(message, { signal })`: extend `OutboxTransport`,
 or pass any object with a `publish()` method. The message it gets carries more
-than this package's did: `headers` and `key` in place of `idempotencyKey`,
-`createdAt` and `availableAt` in epoch milliseconds (the outbox rows kept
-ISO-8601 text), and `attempts`, the failed attempts so far (0 on the first
-delivery). After `publishTimeout` the relay aborts `signal` and counts the
-attempt as failed; a transport that ignores the signal keeps running, and its
-retry may publish the message a second time.
+than this package's did: `headers` in place of `idempotencyKey` (now the
+`x-idempotency-key` header), an ordering `key`, `createdAt` and `availableAt`
+in epoch milliseconds (the outbox rows kept ISO-8601 text), `attempts`, the
+failed attempts so far (0 on the first delivery), and `lastError`, the error
+of the last one (`null` before it). After `publishTimeout` the relay aborts
+`signal` and counts the attempt as failed; a transport that ignores the signal
+keeps running, and its retry may publish the message a second time.
 
 This package had exactly one transport. The module has any number, by name, and
 publishes each message to exactly one of them: `local` (the
@@ -289,16 +295,17 @@ export class OrderService {
   transaction; without `notify()`, the message goes out at the next poll.
 - **`idempotencyKey` becomes a header.** Transports put headers on the wire, and
   the reference app's consumers fall back to `x-idempotency-key` as this
-  package's did. There is no producer-side dedup any more: the partial unique
-  index on `idempotency_key` failed a second `enqueue()` with the same key for
-  as long as the first row existed, completed rows included. An `id` you pass
-  is unique only while its message is pending, since a published message is
-  deleted. If you relied on the index to refuse a repeated business event,
-  enforce that in your own table, in the same transaction.
+  package's did. There is no producer-side dedup any more: the unique index on
+  `idempotency_key` (partial on PostgreSQL and SQLite) failed a second
+  `enqueue()` with the same key for as long as the first row existed,
+  completed rows included. An `id` you pass is unique only while its message
+  is pending, since a published message is deleted. If you relied on the
+  index to refuse a repeated business event, enforce that in your own table,
+  in the same transaction.
 - **`maxAttempts` has no per-message equivalent.** The budget is module-wide;
   see [Retries and dead letters](#retries-and-dead-letters).
-- **`availableAt` is unchanged** (a `Date` or epoch milliseconds), or pass
-  `delay: '10m'`; not both.
+- **`availableAt` stays**, and takes epoch milliseconds as well as a `Date`;
+  or pass `delay: '10m'`, not both.
 - **`key` is new: an ordering key.** Messages that share a key are published one
   at a time, in the order their transactions committed, and a retrying message
   holds back the rest of its key. This package gave no order at all. Opt in per
@@ -339,12 +346,15 @@ The relay is part of the module. By default it runs in every process that boots
 hooks, so a deploy drains the relay:
 
 ```ts
-// After
-const app = await NestFactory.create(AppModule);
-// On SIGTERM the relay stops claiming, lets in-flight publishes settle,
-// and releases the leases on messages it hasn't started.
-app.enableShutdownHooks();
-await app.listen(3000);
+// After: main.ts
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  // On SIGTERM the relay stops claiming, lets in-flight publishes settle,
+  // and releases the leases on messages it hasn't started.
+  app.enableShutdownHooks();
+  await app.listen(3000);
+}
+void bootstrap();
 ```
 
 To keep publishing in a separate worker, turn the relay off in the API
@@ -357,8 +367,11 @@ OutboxModule.forRoot({
 });
 
 // worker.ts
-const app = await NestFactory.createApplicationContext(AppModule);
-app.enableShutdownHooks();
+async function bootstrap() {
+  const app = await NestFactory.createApplicationContext(AppModule);
+  app.enableShutdownHooks();
+}
+void bootstrap();
 ```
 
 The reference app keeps `enabled: false` in `AppModule` and calls
@@ -525,7 +538,8 @@ export class OrderPlacedHandler implements OnModuleInit {
 export class OrderPlacedHandler {
   constructor(private readonly txHost: TransactionHost<TransactionalAdapterDrizzleOrm<AppDatabase>>) {}
 
-  @OnOutboxMessage('order.placed', { consumer: 'order-audit' })
+  // The runOnce() source it replaces, so the inbox records carried over still match
+  @OnOutboxMessage('order.placed', { consumer: 'order.placed:audit' })
   @Transactional()
   async audit(payload: unknown, ctx: OutboxHandlerContext<AppDatabase>): Promise<void> {
     if (!isOrderPlaced(payload)) {
@@ -543,13 +557,16 @@ export class OrderPlacedHandler {
 - **Handlers are discovered, not registered.** Put `@OnOutboxMessage()` on a
   method of a singleton provider; a request-scoped one fails the startup.
 - **Every handler has an inbox**, named by `consumer` (required; keep it
-  stable, or every past message looks new). By default the `local` transport
-  skips a message id the consumer has processed, and records it after the
-  handler succeeds. That record is not atomic with the handler: if the process
-  dies in between, the handler runs again. For database writes,
-  `ctx.processInTransaction(tx, work)` records the id in your transaction, which
-  makes them exactly-once. `inbox: false` runs every delivery. This package's
-  registry handlers had no inbox unless you paired them with `runOnce()`.
+  stable, or every past message looks new). A handler that replaces a
+  `runOnce()` takes its source as the name, so the records
+  [carried over](#carry-over-the-rows-in-flight) from `inbox_events` still
+  match. By default the `local` transport skips a message id the consumer has
+  processed, and records it after the handler succeeds. That record is not
+  atomic with the handler: if the process dies in between, the handler runs
+  again. For database writes, `ctx.processInTransaction(tx, work)` records the
+  id in your transaction, which makes them exactly-once. `inbox: false` runs
+  every delivery. This package's registry handlers had no inbox unless you
+  paired them with `runOnce()`.
 - **A topic can have several handlers**, each with its own consumer name and
   inbox, run concurrently. This package allowed one handler per topic.
 - **Return values are ignored.** Return to succeed, throw to retry, and throw
@@ -624,11 +641,12 @@ module's single `PostgresOutboxStore`, registered as in
   `npx drizzle-kit generate --custom --name=outbox`, then fill the file with
   `npx nest-outbox sql --statement-breakpoints`. The migrations only add
   tables, columns and indexes; there are no down migrations.
-- **READ COMMITTED must be the server's default.** At startup the store refuses
-  a stricter `default_transaction_isolation`. This package pinned READ
-  COMMITTED on its own transactions instead, so a SERIALIZABLE default worked;
-  set the database's default to `read committed`. Your own transactions may
-  run at any level.
+- **READ COMMITTED must be the default.** At startup the store reads
+  `default_transaction_isolation` on its connection and refuses a stricter
+  level, whether the server, the database or the role set it. This package
+  pinned READ COMMITTED on its own transactions instead, so a SERIALIZABLE
+  default worked; set it back to `read committed` for the database, or for the
+  store's own connections. Your own transactions may run at any level.
 - **`add()` takes a lock per key in your transaction**, so producers of the same
   key take turns. Keep the transactions that add keyed messages short.
 - **A connection dropped mid-transaction.** Through `fromDrizzle()`, the store's
@@ -765,7 +783,10 @@ records. Move both before you drop the tables:
 - **Keep the ids.** An event the old worker claimed may already have reached
   its consumers. Under its old id, their carried-over inbox records recognise
   it when the new relay publishes it again. For that, keep the consumer names:
-  the inbox records are keyed by them.
+  the inbox records are keyed by them. An in-process handler's `runOnce()` was
+  keyed by `idempotencyKey ?? id`, and the `local` transport looks up the id:
+  a record kept under a carried event's idempotency key needs a copy under the
+  event's id.
 - **Decide about failed events.** On PostgreSQL and MySQL, no API writes a dead
   letter: re-add the failed events you still want delivered (they get a fresh
   budget), and export the rest. Completed events are history; keep the table
@@ -779,20 +800,23 @@ and 0009 drops `outbox_events` and `inbox_events`
 [`0009_drop_legacy_outbox_tables.sql`](https://github.com/nest-native/reference-app/blob/main/src/database/migrations/0009_drop_legacy_outbox_tables.sql),
 proven by
 [`outbox-carry-over.spec.ts`](https://github.com/nest-native/reference-app/blob/main/test/integration/outbox-carry-over.spec.ts)).
-In-process, the old registry handlers kept no inbox, so a carried-over event
-they had already handled is handled again.
+The reference app's old registry handlers kept no inbox, so a carried-over
+event they had already handled is handled again there. Handlers that paired
+with `runOnce()` need the copy under the event's id that the script below
+makes.
 
 On PostgreSQL and MySQL the store's tables are its own, so carry the rows over
 through the module's API, from a script that boots only the database and the
 outbox. Run it once the store's schema exists (`npx nest-outbox migrate` in
 production) and before the new consumers start, then once more after the last
-old instance has stopped: it moves only what is still there.
+old instance has stopped. It deletes only the events it carried over, so the
+second run moves what the old instances added in between.
 
 ```ts
 import { DrizzleModule } from '@nestjs/drizzle';
 import { Outbox, OutboxInbox, OutboxModule } from '@nestjs/outbox';
 import { inboxEvents, outboxEvents } from '@nest-native/messaging/postgres'; // or /mysql
-import { asc, inArray } from 'drizzle-orm';
+import { asc, eq, inArray } from 'drizzle-orm';
 
 @Module({
   imports: [DrizzleModule.forRoot({ db }), OutboxModule.forRoot({ relay: { enabled: false } })],
@@ -800,33 +824,47 @@ import { asc, inArray } from 'drizzle-orm';
 })
 class CarryOverModule {}
 
-const app = await NestFactory.createApplicationContext(CarryOverModule);
-const outbox = app.get(Outbox);
-const inbox = app.get(OutboxInbox);
-const unpublished = inArray(outboxEvents.status, ['pending', 'processing']);
+async function main(): Promise<void> {
+  const app = await NestFactory.createApplicationContext(CarryOverModule);
+  const outbox = app.get(Outbox);
+  const inbox = app.get(OutboxInbox);
+  const unpublished = inArray(outboxEvents.status, ['pending', 'processing']);
 
-await db.transaction(async (tx) => {
-  // The consumers' records, under the same names.
-  for (const record of await tx.select().from(inboxEvents)) {
-    await inbox.processInTransaction(tx, record.source, record.messageKey, () => undefined);
-  }
-  // The unpublished events, with their ids and due times. Their attempts start over.
-  const events = await tx.select().from(outboxEvents).where(unpublished).orderBy(asc(outboxEvents.createdAt));
-  if (events.length > 0) {
-    await outbox.add(
-      tx,
-      events.map((event) => ({
-        id: event.id,
-        topic: event.topic,
-        payload: event.payload,
-        headers: event.idempotencyKey ? { 'x-idempotency-key': event.idempotencyKey } : {},
-        availableAt: new Date(event.availableAt),
-      })),
-    );
-  }
-  await tx.delete(outboxEvents).where(unpublished);
-});
-await app.close();
+  await db.transaction(async (tx) => {
+    // The consumers' records, under the same names.
+    for (const record of await tx.select().from(inboxEvents)) {
+      await inbox.processInTransaction(tx, record.source, record.messageKey, () => undefined);
+    }
+    // The unpublished events, with their ids and due times. Their attempts start over.
+    const events = await tx.select().from(outboxEvents).where(unpublished).orderBy(asc(outboxEvents.createdAt));
+    // In-process handlers keyed runOnce() by idempotencyKey ?? id; the local transport checks the id.
+    for (const event of events) {
+      if (event.idempotencyKey) {
+        const keyed = await tx.select().from(inboxEvents).where(eq(inboxEvents.messageKey, event.idempotencyKey));
+        for (const record of keyed) {
+          await inbox.processInTransaction(tx, record.source, event.id, () => undefined);
+        }
+      }
+    }
+    if (events.length > 0) {
+      await outbox.add(
+        tx,
+        events.map((event) => ({
+          id: event.id,
+          topic: event.topic,
+          payload: event.payload,
+          headers: event.idempotencyKey ? { 'x-idempotency-key': event.idempotencyKey } : undefined,
+          availableAt: new Date(event.availableAt),
+        })),
+      );
+      // Only the events carried over: one an old instance added since the select waits for the next run.
+      await tx.delete(outboxEvents).where(inArray(outboxEvents.id, events.map((event) => event.id)));
+    }
+  });
+  await app.close();
+}
+
+void main();
 ```
 
 For a large inbox, copy only the records younger than your longest redelivery
@@ -852,11 +890,11 @@ long, or bring a wake back:
 
 - **Same machine (`WakeSocketServer`, `WakeSocketClient`).** Copy
   [`wake-socket.ts`](https://github.com/nest-native/messaging/blob/main/packages/messaging/wake-socket.ts)
-  (MIT, `node:net` only), replacing its `WakeSignal` import with
-  `{ notify(): void }`. The relay is a valid waker:
+  (MIT; it imports only `node:net` and `node:fs`), replacing its `WakeSignal`
+  import with `{ notify(): void }`. The relay is a valid waker:
 
   ```ts
-  // In the relay's process
+  // In the relay process's bootstrap()
   const wakes = new WakeSocketServer({ path: WAKE_SOCKET, waker: app.get(OutboxRelay) });
   await wakes.listen(); // await wakes.close() on shutdown
 
@@ -966,10 +1004,12 @@ for a consumer shell.
 ## RabbitMQ
 
 The module ships no transport over amqplib. `ClientProxyTransport` over Nest's
-RMQ client only awaits `ClientProxy.emit()`: the wire becomes Nest's RMQ
-packet, and whether an unroutable message counts as a failure depends on that
-client (not verified here). The reference app ported this
-package's transport and consumer instead:
+RMQ client only awaits `ClientProxy.emit()`, and the wire becomes Nest's RMQ
+packet. That client publishes on a confirm channel without `mandatory` (unless
+the `RmqRecord` that `toPacket` returns sets it) and listens for no returned
+message, so an unroutable message is lost while the relay counts it as
+published. The reference app ported this package's transport and consumer
+instead:
 
 - [`rabbit-outbox.transport.ts`](https://github.com/nest-native/reference-app/blob/main/src/modules/rabbitmq/rabbit-outbox.transport.ts)
   publishes `mandatory` on a confirm channel, resolves only when the broker
@@ -1002,6 +1042,7 @@ OutboxModule.forRootAsync({
   useFactory: (connection: RecoveringChannelModel) => ({
     transports: { rabbitmq: new RabbitOutboxTransport({ connection, exchange: 'events' }) },
     relay: { lease: '1m', publishTimeout: '10s' }, // what confirmTimeoutMs bounded
+    retry: { attempts: 10, backoff: { delay: '1s', maxDelay: '1m' } },
   }),
 });
 ```

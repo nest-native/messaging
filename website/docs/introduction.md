@@ -87,7 +87,6 @@ or the [API Reference](./api-reference.md) for the full surface.
 - **Transports:** in-process (default, `@nest-native/messaging/in-process` — no
   broker, at-least-once via the claimer), Kafka (`@nest-native/kafka`), and
   RabbitMQ (`amqplib`), plus an in-memory one for tests.
-- **Roadmap:** additional transports.
 - **Out of scope:** CDC (Debezium) log-tailing is an intentional non-goal — this
   is the application-level outbox, written through your ORM transaction. Generic
   multi-broker routing is also out of scope.
